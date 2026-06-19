@@ -1,0 +1,17 @@
+build/
+install/
+log/
+runtime/*
+!runtime/.gitkeep
+
+**/__pycache__/
+*.pyc
+*.so
+
+# Public upstream weights are downloaded separately.
+foundation_pose/weights/
+models/sam/*.pth
+models/sam/*.bad-*
+
+# Local FoundationPose build artifacts.
+foundation_pose/mycpp/build/
