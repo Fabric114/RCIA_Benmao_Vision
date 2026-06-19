@@ -67,12 +67,16 @@ coverage.xml
 *.cover
 demo_data/
 debug/
-weights/
+weights/*
+!weights/
+!weights/tip.md
 *.py,cover
 .hypothesis/
 .pytest_cache/
 *.pth
-weights/
+weights/*
+!weights/
+!weights/tip.md
 # Translations
 *.mo
 *.pot
