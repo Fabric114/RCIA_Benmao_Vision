@@ -22,6 +22,6 @@ cd ${PROJ_ROOT}/nvdiffrast && \
 # Install mycuda
 cd ${PROJ_ROOT}/bundlesdf/mycuda && \
 rm -rf build *egg* *.so && \
-"${PYTHON_EXECUTABLE}" -m pip install -e .
+"${PYTHON_EXECUTABLE}" -m pip install --no-build-isolation -e .
 
 cd ${PROJ_ROOT}

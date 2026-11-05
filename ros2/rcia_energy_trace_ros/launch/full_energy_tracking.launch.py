@@ -139,7 +139,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "yolo_model",
             default_value=PathJoinSubstitution(
-                [LaunchConfiguration("project_root"), "models", "yolo", "best-v2.pt"]
+                [LaunchConfiguration("project_root"), "models", "yolo", "best_openvino_model"]
             ),
         ),
         DeclareLaunchArgument("init_request_topic", default_value="/energy/init_request"),

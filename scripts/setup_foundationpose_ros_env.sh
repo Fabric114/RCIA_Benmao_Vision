@@ -12,7 +12,7 @@ if ! command -v conda >/dev/null 2>&1; then
 fi
 
 CONDA_SOLVER="${CONDA_SOLVER:-conda}"
-CREATE_FROM_BASE="${CREATE_FROM_BASE:-1}"
+CREATE_FROM_BASE="${CREATE_FROM_BASE:-0}"
 if [[ "${CONDA_SOLVER}" == "mamba" ]] && command -v mamba >/dev/null 2>&1; then
   CONDA_BIN="$(command -v mamba)"
 else
@@ -34,8 +34,10 @@ if ! conda env list | awk '{print $1}' | grep -qx "${ENV_NAME}"; then
 fi
 
 eval "$(conda shell.bash hook)"
+set +u
 conda activate "${ENV_NAME}"
 source /opt/ros/humble/setup.bash
+set -u
 source "${PROJECT_ROOT}/scripts/foundationpose_env.sh"
 
 python -m pip install --upgrade pip setuptools wheel
@@ -88,7 +90,7 @@ python -m pip install \
   pyrealsense2==2.56.5.9235 \
   h5py \
   pyrender==0.1.45 \
-  PyOpenGL>=3.1.0 \
+  "PyOpenGL>=3.1.0" \
   pyglet==1.5.28 \
   rtree==1.2.0 \
   xatlas==0.0.9 \

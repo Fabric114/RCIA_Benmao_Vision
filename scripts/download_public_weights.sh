@@ -52,7 +52,6 @@ from huggingface_hub import snapshot_download
 snapshot_download(
     repo_id="gpue/foundationpose-weights",
     local_dir=r"${FP_WEIGHTS_DIR}",
-    local_dir_use_symlinks=False,
 )
 PY
 }
