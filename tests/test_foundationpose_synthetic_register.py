@@ -47,6 +47,15 @@ class SyntheticRegisterTest(unittest.TestCase):
         self.assertLessEqual(c, 0.005)
         self.assertLessEqual(a, 5.0)
 
+    def test_z12_cuda(self):
+        from scripts.foundationpose_factory import EstimatorConfig
+
+        c, a, timing = run_synthetic_register(EstimatorConfig(mesh_file=MESH, symmetry_mode="z12"))
+        print("z12 center_err_m", c, "axis_err_deg", a)
+        print("z12 timing_ms", timing)
+        self.assertLessEqual(c, 0.005)
+        self.assertLessEqual(a, 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()

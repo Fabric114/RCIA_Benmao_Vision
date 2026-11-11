@@ -384,6 +384,7 @@ if __name__ == '__main__':
 
     # 优化迭代次数
     parser.add_argument('--est_refine_iter', type=int, default=5)
+    parser.add_argument('--symmetry_mode', type=str, default='z12', choices=['none', 'z12'])
     parser.add_argument('--track_refine_iter', type=int, default=2)
 
     # 调试
@@ -444,7 +445,8 @@ if __name__ == '__main__':
 
     # 加载 3D 模型并初始化 FoundationPose
     from scripts.foundationpose_factory import EstimatorConfig, build_estimator
-    bundle = build_estimator(EstimatorConfig(mesh_file=args.mesh_file, debug=args.debug, debug_dir=debug_dir))
+    bundle = build_estimator(EstimatorConfig(mesh_file=args.mesh_file, debug=args.debug, debug_dir=debug_dir,
+                                             symmetry_mode=args.symmetry_mode))
     est, mesh, to_origin, bbox_vis = bundle.estimator, bundle.mesh, bundle.to_origin, bundle.bbox_vis
     logging.info(f'Mesh: {len(mesh.vertices)} 顶点, {len(mesh.faces)} 面')
     logging.info('FoundationPose 初始化完成')

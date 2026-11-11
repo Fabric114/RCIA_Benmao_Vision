@@ -96,6 +96,7 @@ class FoundationPoseInitNode(Node):
         self.declare_parameter("register_conf", 0.75)
         self.declare_parameter("stable_frames", 3)
         self.declare_parameter("est_refine_iter", 5)
+        self.declare_parameter("symmetry_mode", "z12")
         self.declare_parameter("sync_tolerance_ms", 5.0)
         self.declare_parameter("sync_queue_size", 60)
         self.declare_parameter("latest_frame_max_age_ms", 120.0)
@@ -271,6 +272,7 @@ class FoundationPoseInitNode(Node):
                 mesh_file=self.get_parameter("mesh_file").value,
                 debug=int(self.get_parameter("debug").value),
                 debug_dir=self.get_parameter("debug_dir").value,
+                symmetry_mode=self.get_parameter("symmetry_mode").value,
             )
         )
         self.estimator_bundle = bundle

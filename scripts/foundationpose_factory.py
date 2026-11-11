@@ -21,6 +21,25 @@ class EstimatorConfig:
     mesh_file: str
     debug: int = 0
     debug_dir: str = "runtime/foundationpose_debug"
+    symmetry_mode: str = "none"
+
+
+def z_symmetry_tfs(step_deg: float = 30.0) -> np.ndarray:
+    angles = np.radians(np.arange(0.0, 360.0, step_deg))
+    tfs = np.tile(np.eye(4), (len(angles), 1, 1))
+    tfs[:, 0, 0] = np.cos(angles)
+    tfs[:, 0, 1] = -np.sin(angles)
+    tfs[:, 1, 0] = np.sin(angles)
+    tfs[:, 1, 1] = np.cos(angles)
+    return tfs
+
+
+def symmetry_tfs_for_mode(mode: str):
+    if mode == "none":
+        return None
+    if mode == "z12":
+        return z_symmetry_tfs(30.0)
+    raise ValueError(f"unknown symmetry_mode: {mode}")
 
 
 @dataclass
@@ -33,6 +52,7 @@ class EstimatorBundle:
 
 
 def build_estimator(cfg: EstimatorConfig) -> EstimatorBundle:
+    symmetry_tfs = symmetry_tfs_for_mode(cfg.symmetry_mode)
     set_logging_format()
     set_seed(0)
     mesh = trimesh.load(cfg.mesh_file, process=False)
@@ -43,6 +63,7 @@ def build_estimator(cfg: EstimatorConfig) -> EstimatorBundle:
     estimator = FoundationPose(
         model_pts=mesh.vertices.copy(),
         model_normals=mesh.vertex_normals.copy(),
+        symmetry_tfs=symmetry_tfs,
         mesh=mesh,
         scorer=ScorePredictor(),
         refiner=PoseRefinePredictor(),
