@@ -25,7 +25,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.latest_rgbd_buffer import LatestRgbdBuffer  # noqa: E402
 from scripts.linemod_silhouette_renderer import load_obj_mesh  # noqa: E402
+from scripts.ros_pose_utils import matrix_to_pose_components  # noqa: E402
 from scripts.ros_rgbd_sync import stamp_to_nanoseconds  # noqa: E402
+from scripts.yaw_canonicalization import YawCanonicalizer, mesh_center_from_vertices  # noqa: E402
 from scripts.initialization_gate import (  # noqa: E402
     InitializationGateParams,
     InitializationGateResult,
@@ -160,6 +162,8 @@ class TrackingSupervisorNode(Node):
         self.declare_parameter("tracking_state_topic", "/energy/tracking_state")
         self.declare_parameter("tracking_health_topic", "/energy/tracking_health")
         self.declare_parameter("mesh_file", str(PROJECT_ROOT / "models/object/Str3D.obj"))
+        self.declare_parameter("canonicalize_yaw", True)
+        self.declare_parameter("yaw_fallback_deg", 15.0)
         self.declare_parameter("target_class", 0)
         self.declare_parameter("supervisor_rate_hz", 8.0)
         self.declare_parameter("sync_tolerance_ms", 15.0)
@@ -208,6 +212,12 @@ class TrackingSupervisorNode(Node):
         self.declare_parameter("filter_lost_presence_threshold", 0.35)
 
         self.vertices, self.faces = load_obj_mesh(self.get_parameter("mesh_file").value)
+        self.yaw_canonicalizer = None
+        if bool(self.get_parameter("canonicalize_yaw").value):
+            self.yaw_canonicalizer = YawCanonicalizer(
+                mesh_center_from_vertices(self.vertices),
+                float(self.get_parameter("yaw_fallback_deg").value),
+            )
         self.latest_buffer = LatestRgbdBuffer(
             color_history_size=int(self.get_parameter("rgbd_history_size").value),
             depth_history_size=int(self.get_parameter("rgbd_history_size").value),
@@ -742,12 +752,36 @@ class TrackingSupervisorNode(Node):
             self.stop_pub.publish(Empty())
             self.stop_in_flight = True
             self.tracking_state_filter.reset_to_search()
+        if decision.publish_stop:
+            self._reset_yaw_canonicalizer()
         if decision.publish_initial_pose and candidate_pose_msg is not None:
             self.initial_pose_pub.publish(candidate_pose_msg)
             self.tracking_state_filter.reset_for_tracking()
             self._clear_active_request()
+            self._reset_yaw_canonicalizer()
         if decision.publish_trusted_pose and m3t_pose is not None:
-            self.trusted_pose_pub.publish(m3t_pose["msg"])
+            self.trusted_pose_pub.publish(self._trusted_pose_msg(m3t_pose))
+
+    def _reset_yaw_canonicalizer(self):
+        if self.yaw_canonicalizer is not None:
+            self.yaw_canonicalizer.reset()
+
+    def _trusted_pose_msg(self, m3t_pose):
+        if self.yaw_canonicalizer is None:
+            return m3t_pose["msg"]
+        source = m3t_pose["msg"]
+        matrix = self.yaw_canonicalizer.apply(m3t_pose["matrix"])
+        components = matrix_to_pose_components(matrix.tolist())
+        msg = PoseStamped()
+        msg.header = source.header
+        msg.pose.position.x = components["position"]["x"]
+        msg.pose.position.y = components["position"]["y"]
+        msg.pose.position.z = components["position"]["z"]
+        msg.pose.orientation.x = components["orientation"]["x"]
+        msg.pose.orientation.y = components["orientation"]["y"]
+        msg.pose.orientation.z = components["orientation"]["z"]
+        msg.pose.orientation.w = components["orientation"]["w"]
+        return msg
 
     def _publish_init_request(self, now_ns, yolo_bbox, yolo_conf, reason):
         if self.active_request is not None:

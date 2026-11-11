@@ -21,6 +21,7 @@ sys.path.insert(0, str(FOUNDATIONPOSE_DIR))
 from estimater import *
 from datareader import *
 import argparse
+from scripts.yaw_canonicalization import YawCanonicalizer, canonicalize_yaw, mesh_center_from_vertices
 try:
     from auto_register import AutoRegisterGate
 except ImportError:
@@ -146,6 +147,7 @@ def run_offline(args, est, mesh, to_origin, bbox_vis, K):
         device='cuda'
     )
     rgb_files, depth_files = read_frames_from_dir(args.data_dir)
+    yaw = None if args.no_canonicalize_yaw else YawCanonicalizer(mesh_center_from_vertices(mesh.vertices))
 
     for i in range(len(rgb_files)):
         logging.info(f'帧 {i}/{len(rgb_files)}: {rgb_files[i]}')
@@ -161,6 +163,8 @@ def run_offline(args, est, mesh, to_origin, bbox_vis, K):
                 logging.info(f'检测框: {bbox}, 遮罩面积: {mask.sum()}')
             pose = est.register(K=K, rgb=color, depth=depth, ob_mask=mask,
                               iteration=args.est_refine_iter)
+            if yaw is not None:
+                pose = canonicalize_yaw(pose, yaw.model_center, yaw.fallback_deg)
             pose_output = Path(args.pose_output)
             pose_output.parent.mkdir(parents=True, exist_ok=True)
             np.savetxt(pose_output, pose.reshape(4, 4))
@@ -168,6 +172,8 @@ def run_offline(args, est, mesh, to_origin, bbox_vis, K):
         else:
             pose = est.track_one(rgb=color, depth=depth, K=K,
                                iteration=args.track_refine_iter)
+            if yaw is not None:
+                pose = yaw.apply(pose)
 
         # 保存位姿
         os.makedirs(f'{args.debug_dir}/ob_in_cam', exist_ok=True)
@@ -189,6 +195,8 @@ def run_offline(args, est, mesh, to_origin, bbox_vis, K):
 def run_live(args, est, mesh, to_origin, bbox_vis, K):
     """实时模式：先检测目标 -> 确认后开始位姿跟踪"""
     import pyrealsense2 as rs
+
+    yaw = None if args.no_canonicalize_yaw else YawCanonicalizer(mesh_center_from_vertices(mesh.vertices))
 
     mask_gen = MaskGenerator(
         yolo_path=args.yolo_model,
@@ -300,6 +308,9 @@ def run_live(args, est, mesh, to_origin, bbox_vis, K):
                     logging.info(f'检测框: {bbox}, 遮罩面积: {mask.sum()}')
                 pose = est.register(K=K, rgb=color, depth=depth, ob_mask=mask,
                                   iteration=args.est_refine_iter)
+                if yaw is not None:
+                    yaw.reset()
+                    pose = yaw.apply(pose)
                 logging.info(f'初始位姿:\n{pose}')
                 # 保存位姿供 M3T 跟踪器读取
                 pose_output = Path(args.pose_output)
@@ -334,6 +345,8 @@ def run_live(args, est, mesh, to_origin, bbox_vis, K):
             if phase == 'track':
                 pose = est.track_one(rgb=color, depth=depth, K=K,
                                    iteration=args.track_refine_iter)
+                if yaw is not None:
+                    pose = yaw.apply(pose)
                 print(f'帧 {frame_idx:04d} 位姿:\n{pose}\n')
                 frame_idx += 1
 
@@ -385,6 +398,7 @@ if __name__ == '__main__':
     # 优化迭代次数
     parser.add_argument('--est_refine_iter', type=int, default=5)
     parser.add_argument('--symmetry_mode', type=str, default='z12', choices=['none', 'z12'])
+    parser.add_argument('--no_canonicalize_yaw', action='store_true')
     parser.add_argument('--track_refine_iter', type=int, default=2)
 
     # 调试

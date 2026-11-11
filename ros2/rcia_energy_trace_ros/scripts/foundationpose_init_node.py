@@ -37,6 +37,7 @@ from scripts.latest_rgbd_buffer import LatestRgbdBuffer  # noqa: E402
 from scripts.ros_pose_utils import matrix_to_pose_components  # noqa: E402
 from scripts.ros_rgbd_sync import stamp_to_nanoseconds  # noqa: E402
 from scripts.timing_diagnostics import make_timing_event  # noqa: E402
+from scripts.yaw_canonicalization import canonicalize_yaw  # noqa: E402
 from scripts.yolo_detection_message import detections_to_json  # noqa: E402
 from scripts.foundationpose_init import MaskGenerator  # noqa: E402
 from scripts.foundationpose_factory import EstimatorConfig, build_estimator  # noqa: E402
@@ -97,6 +98,8 @@ class FoundationPoseInitNode(Node):
         self.declare_parameter("stable_frames", 3)
         self.declare_parameter("est_refine_iter", 5)
         self.declare_parameter("symmetry_mode", "z12")
+        self.declare_parameter("canonicalize_yaw", True)
+        self.declare_parameter("yaw_fallback_deg", 15.0)
         self.declare_parameter("sync_tolerance_ms", 5.0)
         self.declare_parameter("sync_queue_size", 60)
         self.declare_parameter("latest_frame_max_age_ms", 120.0)
@@ -279,6 +282,15 @@ class FoundationPoseInitNode(Node):
         self.to_origin = bundle.to_origin
         self.bbox_vis = bundle.bbox_vis
         return bundle.estimator
+
+    def _canonicalize_pose(self, pose):
+        if not bool(self.get_parameter("canonicalize_yaw").value):
+            return pose
+        return canonicalize_yaw(
+            pose,
+            self.estimator_bundle.model_center,
+            float(self.get_parameter("yaw_fallback_deg").value),
+        )
 
     def _camera_info_cb(self, msg):
         with self.lock:
@@ -485,6 +497,7 @@ class FoundationPoseInitNode(Node):
             ob_mask=mask,
             iteration=int(self.get_parameter("est_refine_iter").value),
         )
+        pose = self._canonicalize_pose(pose)
         self._publish_timing(
             "foundationpose_register_done",
             frame_stamp_ns=color_stamp_ns,
@@ -659,6 +672,7 @@ class FoundationPoseInitNode(Node):
             K=camera_info_to_matrix(camera_info),
             iteration=int(self.get_parameter("track_refine_iter").value),
         )
+        pose = self._canonicalize_pose(pose)
         self._publish_supervisor_pose(pose, header.stamp)
         pose_age_ms = (self._now_ns() - color_stamp_ns) / 1_000_000.0
         decision = self.initial_pose_policy.on_track_pose(pose_age_ms)
