@@ -88,7 +88,7 @@ class FoundationPoseInitNode(Node):
         self.declare_parameter("request_required", True)
         self.declare_parameter("output_frame_id", "camera_color_optical_frame")
         self.declare_parameter("mesh_file", str(PROJECT_ROOT / "models/object/Str3D.obj"))
-        self.declare_parameter("yolo_model", str(PROJECT_ROOT / "models/yolo/best-v2.pt"))
+        self.declare_parameter("yolo_model", str(PROJECT_ROOT / "models/yolo/best_openvino_model"))
         self.declare_parameter("sam_checkpoint", str(PROJECT_ROOT / "models/sam/sam_vit_b_01ec64.pth"))
         self.declare_parameter("sam_model_type", "vit_b")
         self.declare_parameter("target_class", -1)

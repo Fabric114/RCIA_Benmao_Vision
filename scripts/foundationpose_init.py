@@ -360,7 +360,7 @@ if __name__ == '__main__':
     parser.add_argument('--mesh_file', type=str,
                         default=str(PROJECT_ROOT / 'models/object/Str3D.obj'))
     parser.add_argument('--yolo_model', type=str,
-                        default=str(PROJECT_ROOT / 'models/yolo/best-v2.pt'))
+                        default=str(PROJECT_ROOT / 'models/yolo/best_openvino_model'))
     parser.add_argument('--sam_checkpoint', type=str,
                         default=str(PROJECT_ROOT / 'models/sam/sam_vit_b_01ec64.pth'))
     parser.add_argument('--sam_model_type', type=str, default='vit_b',
