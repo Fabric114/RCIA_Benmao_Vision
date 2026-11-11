@@ -39,6 +39,7 @@ class FoundationPose:
       self.refiner = PoseRefinePredictor()
 
     self.pose_last = None   # Used for tracking; per the centered mesh
+    self.last_timing_ms = {}
 
 
   def reset_object(self, model_pts, model_normals, symmetry_tfs=None, mesh=None):
@@ -162,6 +163,8 @@ class FoundationPose:
     '''
     set_seed(0)
     logging.info('Welcome')
+    t_start = timing_clock()
+    self.last_timing_ms = {'hypo': 0.0, 'refine': 0.0, 'score': 0.0, 'total': 0.0}
 
     if self.glctx is None:
       if glctx is None:
@@ -186,6 +189,7 @@ class FoundationPose:
       logging.info(f'valid too small, return')
       pose = np.eye(4)
       pose[:3,3] = self.guess_translation(depth=depth, mask=ob_mask, K=K)
+      self.last_timing_ms['total'] = (timing_clock() - t_start) * 1000.0
       return pose
 
     if self.debug>=2:
@@ -200,6 +204,7 @@ class FoundationPose:
     self.ob_id = ob_id
     self.ob_mask = ob_mask
 
+    t_hypo = timing_clock()
     poses = self.generate_random_pose_hypo(K=K, rgb=rgb, depth=depth, mask=ob_mask, scene_pts=None)
     poses = poses.data.cpu().numpy()
     logging.info(f'poses:{poses.shape}')
@@ -212,13 +217,16 @@ class FoundationPose:
     logging.info(f"after viewpoint, add_errs min:{add_errs.min()}")
 
     xyz_map = depth2xyzmap(depth, K)
+    t_refine = timing_clock()
     poses, vis = self.refiner.predict(mesh=self.mesh, mesh_tensors=self.mesh_tensors, rgb=rgb, depth=depth, K=K, ob_in_cams=poses.data.cpu().numpy(), normal_map=normal_map, xyz_map=xyz_map, glctx=self.glctx, mesh_diameter=self.diameter, iteration=iteration, get_vis=self.debug>=2)
     if vis is not None:
       imageio.imwrite(f'{self.debug_dir}/vis_refiner.png', vis)
 
+    t_score = timing_clock()
     scores, vis = self.scorer.predict(mesh=self.mesh, rgb=rgb, depth=depth, K=K, ob_in_cams=poses.data.cpu().numpy(), normal_map=normal_map, mesh_tensors=self.mesh_tensors, glctx=self.glctx, mesh_diameter=self.diameter, get_vis=self.debug>=2)
     if vis is not None:
       imageio.imwrite(f'{self.debug_dir}/vis_score.png', vis)
+    t_score_end = timing_clock()
 
     add_errs = self.compute_add_err_to_gt_pose(poses)
     logging.info(f"final, add_errs min:{add_errs.min()}")
@@ -237,7 +245,14 @@ class FoundationPose:
     self.poses = poses
     self.scores = scores
 
-    return best_pose.data.cpu().numpy()
+    best_pose = best_pose.data.cpu().numpy()
+    self.last_timing_ms = {
+      'hypo': (t_refine - t_hypo) * 1000.0,
+      'refine': (t_score - t_refine) * 1000.0,
+      'score': (t_score_end - t_score) * 1000.0,
+      'total': (timing_clock() - t_start) * 1000.0,
+    }
+    return best_pose
 
 
   def compute_add_err_to_gt_pose(self, poses):

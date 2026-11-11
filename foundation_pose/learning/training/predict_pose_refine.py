@@ -21,10 +21,16 @@ from Utils import *
 from datareader import *
 
 
+def timing_clock():
+  if torch.cuda.is_available():
+    torch.cuda.synchronize()
+  return time.perf_counter()
+
 
 @torch.inference_mode()
-def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_ratio, xyz_map, normal_map=None, mesh_diameter=None, cfg=None, glctx=None, mesh_tensors=None, dataset:PoseRefinePairH5Dataset=None):
+def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_ratio, xyz_map, normal_map=None, mesh_diameter=None, cfg=None, glctx=None, mesh_tensors=None, dataset:PoseRefinePairH5Dataset=None, timing=None):
   logging.info("Welcome make_crop_data_batch")
+  t_start = timing_clock() if timing is not None else None
   H,W = depth.shape[:2]
   args = []
   method = 'box_3d'
@@ -44,6 +50,8 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
   bbox2d_crop = torch.as_tensor(np.array([0, 0, cfg['input_resize'][0]-1, cfg['input_resize'][1]-1]).reshape(2,2), device='cuda', dtype=torch.float)
   bbox2d_ori = transform_pts(bbox2d_crop, tf_to_crops.inverse()).reshape(-1,4)
 
+  if timing is not None:
+    t_render = timing_clock()
   for b in range(0,len(poseA),bs):
     extra = {}
     rgb_r, depth_r, normal_r = nvdiffrast_render(K=K, H=H, W=W, ob_in_cams=poseA[b:b+bs], context='cuda', get_normal=cfg['use_normal'], glctx=glctx, mesh_tensors=mesh_tensors, output_size=cfg['input_resize'], bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
@@ -59,6 +67,8 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
     normal_rs = torch.cat(normal_rs, dim=0).permute(0,3,1,2)  #(B,3,H,W)
 
   logging.info("render done")
+  if timing is not None:
+    t_warp = timing_clock()
 
   rgbBs = kornia.geometry.transform.warp_perspective(torch.as_tensor(rgb, dtype=torch.float, device='cuda').permute(2,0,1)[None].expand(B,-1,-1,-1), tf_to_crops, dsize=render_size, mode='bilinear', align_corners=False)
   if rgb_rs.shape[-2:]!=cfg['input_resize']:
@@ -85,6 +95,10 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
   pose_data = dataset.transform_batch(batch=pose_data, H_ori=H, W_ori=W, bound=1)
 
   logging.info("pose batch data done")
+  if timing is not None:
+    t_end = timing_clock()
+    timing['render'] += (t_warp - t_render) * 1000.0
+    timing['warp'] += ((t_render - t_start) + (t_end - t_warp)) * 1000.0
 
   return pose_data
 
@@ -144,6 +158,7 @@ class PoseRefinePredictor:
     logging.info("init done")
     self.last_trans_update = None
     self.last_rot_update = None
+    self.last_timing_ms = {'render': 0.0, 'warp': 0.0, 'net': 0.0}
 
 
   @torch.inference_mode()
@@ -153,6 +168,8 @@ class PoseRefinePredictor:
     @ob_in_cams: np array (N,4,4)
     '''
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    timing = {'render': 0.0, 'warp': 0.0, 'net': 0.0}
+    self.last_timing_ms = timing
     logging.info(f'ob_in_cams:{ob_in_cams.shape}')
     tf_to_center = np.eye(4)
     ob_centered_in_cams = ob_in_cams
@@ -181,16 +198,18 @@ class PoseRefinePredictor:
 
     for _ in range(iteration):
       logging.info("making cropped data")
-      pose_data = make_crop_data_batch(self.cfg.input_resize, B_in_cams, mesh_centered, rgb_tensor, depth_tensor, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter)
+      pose_data = make_crop_data_batch(self.cfg.input_resize, B_in_cams, mesh_centered, rgb_tensor, depth_tensor, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter, timing=timing)
       B_in_cams = []
       for b in range(0, pose_data.rgbAs.shape[0], bs):
         A = torch.cat([pose_data.rgbAs[b:b+bs].cuda(), pose_data.xyz_mapAs[b:b+bs].cuda()], dim=1).float()
         B = torch.cat([pose_data.rgbBs[b:b+bs].cuda(), pose_data.xyz_mapBs[b:b+bs].cuda()], dim=1).float()
         logging.info("forward start")
+        t_net = timing_clock()
         with torch.cuda.amp.autocast(enabled=self.amp):
           output = self.model(A,B)
         for k in output:
           output[k] = output[k].float()
+        timing['net'] += (timing_clock() - t_net) * 1000.0
         logging.info("forward done")
         if self.cfg['trans_rep']=='tracknet':
           if not self.cfg['normalize_xyz']:

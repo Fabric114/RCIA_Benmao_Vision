@@ -442,26 +442,11 @@ if __name__ == '__main__':
     (debug_path / 'track_vis').mkdir(parents=True, exist_ok=True)
     (debug_path / 'ob_in_cam').mkdir(parents=True, exist_ok=True)
 
-    # 加载 3D 模型
-    mesh = trimesh.load(args.mesh_file, process=False)
-    if mesh.vertex_normals is None:
-        mesh.compute_vertex_normals()
+    # 加载 3D 模型并初始化 FoundationPose
+    from scripts.foundationpose_factory import EstimatorConfig, build_estimator
+    bundle = build_estimator(EstimatorConfig(mesh_file=args.mesh_file, debug=args.debug, debug_dir=debug_dir))
+    est, mesh, to_origin, bbox_vis = bundle.estimator, bundle.mesh, bundle.to_origin, bundle.bbox_vis
     logging.info(f'Mesh: {len(mesh.vertices)} 顶点, {len(mesh.faces)} 面')
-
-    # 用于可视化的有向包围盒
-    to_origin, extents = trimesh.bounds.oriented_bounds(mesh)
-    bbox_vis = np.stack([-extents / 2, extents / 2], axis=0).reshape(2, 3)
-
-    # 初始化 FoundationPose
-    scorer = ScorePredictor()
-    refiner = PoseRefinePredictor()
-    glctx = dr.RasterizeCudaContext()
-    est = FoundationPose(
-        model_pts=mesh.vertices.copy(),
-        model_normals=mesh.vertex_normals.copy(),
-        mesh=mesh, scorer=scorer, refiner=refiner,
-        debug_dir=debug_dir, debug=args.debug, glctx=glctx
-    )
     logging.info('FoundationPose 初始化完成')
 
     # --- 运行 ---

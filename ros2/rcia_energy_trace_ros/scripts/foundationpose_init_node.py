@@ -39,16 +39,10 @@ from scripts.ros_rgbd_sync import stamp_to_nanoseconds  # noqa: E402
 from scripts.timing_diagnostics import make_timing_event  # noqa: E402
 from scripts.yolo_detection_message import detections_to_json  # noqa: E402
 from scripts.foundationpose_init import MaskGenerator  # noqa: E402
-from estimater import FoundationPose  # noqa: E402
-from learning.training.predict_pose_refine import PoseRefinePredictor  # noqa: E402
-from learning.training.predict_score import ScorePredictor  # noqa: E402
+from scripts.foundationpose_factory import EstimatorConfig, build_estimator  # noqa: E402
 from Utils import (  # noqa: E402
-    dr,
     draw_posed_3d_box,
     draw_xyz_axis,
-    set_logging_format,
-    set_seed,
-    trimesh,
 )
 
 
@@ -272,24 +266,17 @@ class FoundationPoseInitNode(Node):
         self.get_logger().info(f"TIMING {msg.data}")
 
     def _create_estimator(self):
-        set_logging_format()
-        set_seed(0)
-        mesh = trimesh.load(self.get_parameter("mesh_file").value, process=False)
-        if mesh.vertex_normals is None:
-            mesh.compute_vertex_normals()
-        to_origin, extents = trimesh.bounds.oriented_bounds(mesh)
-        self.to_origin = to_origin
-        self.bbox_vis = np.stack([-extents / 2, extents / 2], axis=0).reshape(2, 3)
-        return FoundationPose(
-            model_pts=mesh.vertices.copy(),
-            model_normals=mesh.vertex_normals.copy(),
-            mesh=mesh,
-            scorer=ScorePredictor(),
-            refiner=PoseRefinePredictor(),
-            debug_dir=self.get_parameter("debug_dir").value,
-            debug=int(self.get_parameter("debug").value),
-            glctx=dr.RasterizeCudaContext(),
+        bundle = build_estimator(
+            EstimatorConfig(
+                mesh_file=self.get_parameter("mesh_file").value,
+                debug=int(self.get_parameter("debug").value),
+                debug_dir=self.get_parameter("debug_dir").value,
+            )
         )
+        self.estimator_bundle = bundle
+        self.to_origin = bundle.to_origin
+        self.bbox_vis = bundle.bbox_vis
+        return bundle.estimator
 
     def _camera_info_cb(self, msg):
         with self.lock:
