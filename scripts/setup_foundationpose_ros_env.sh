@@ -76,6 +76,7 @@ python -m pip install \
   ruamel.yaml==0.18.6 \
   PyYAML==6.0.1 \
   kornia==0.7.2 \
+  "moderngl>=5.10" \
   transformations==2024.6.1 \
   pandas \
   matplotlib \
