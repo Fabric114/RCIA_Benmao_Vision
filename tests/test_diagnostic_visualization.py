@@ -43,7 +43,7 @@ class DiagnosticVisualizationTest(unittest.TestCase):
 
         rendered = compose_pipeline_view(
             yolo=yolo,
-            sam=None,
+            mask=None,
             foundationpose=foundationpose,
             m3t=None,
             panel_size=(80, 60),
@@ -73,7 +73,7 @@ class DiagnosticVisualizationTest(unittest.TestCase):
     def test_compose_pipeline_view_accepts_tracking_status(self):
         rendered = compose_pipeline_view(
             yolo=np.zeros((20, 20, 3), dtype=np.uint8),
-            sam=None,
+            mask=None,
             foundationpose=None,
             m3t=None,
             panel_size=(80, 60),
@@ -120,12 +120,12 @@ class DiagnosticVisualizationTest(unittest.TestCase):
     def test_compose_pipeline_view_accepts_panel_statuses(self):
         rendered = compose_pipeline_view(
             yolo=np.zeros((20, 20, 3), dtype=np.uint8),
-            sam=np.zeros((20, 20, 3), dtype=np.uint8),
+            mask=np.zeros((20, 20, 3), dtype=np.uint8),
             foundationpose=None,
             m3t=None,
             panel_size=(80, 60),
             panel_statuses={
-                "sam": {"label": "stale 3.1s", "stale": True},
+                "mask": {"label": "stale 3.1s", "stale": True},
                 "foundationpose": {"label": "waiting request", "stale": False},
             },
         )

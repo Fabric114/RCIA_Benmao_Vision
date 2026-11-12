@@ -125,23 +125,27 @@ class FoundationPose:
     logging.info(f"self.rot_grid: {self.rot_grid.shape}")
 
 
-  def generate_random_pose_hypo(self, K, rgb, depth, mask, scene_pts=None):
+  def generate_random_pose_hypo(self, K, rgb, depth, mask, scene_pts=None, bbox_xyxy=None):
     '''
     @scene_pts: torch tensor (N,3)
     '''
     ob_in_cams = self.rot_grid.clone()
-    center = self.guess_translation(depth=depth, mask=mask, K=K)
+    center = self.guess_translation(depth=depth, mask=mask, K=K, bbox_xyxy=bbox_xyxy)
     ob_in_cams[:,:3,3] = torch.tensor(center, device='cuda', dtype=torch.float).reshape(1,3)
     return ob_in_cams
 
 
-  def guess_translation(self, depth, mask, K):
+  def guess_translation(self, depth, mask, K, bbox_xyxy=None):
     vs,us = np.where(mask>0)
     if len(us)==0:
       logging.info(f'mask is all zero')
       return np.zeros((3))
-    uc = (us.min()+us.max())/2.0
-    vc = (vs.min()+vs.max())/2.0
+    if bbox_xyxy is not None:
+      uc = (bbox_xyxy[0]+bbox_xyxy[2])/2.0
+      vc = (bbox_xyxy[1]+bbox_xyxy[3])/2.0
+    else:
+      uc = (us.min()+us.max())/2.0
+      vc = (vs.min()+vs.max())/2.0
     valid = mask.astype(bool) & (depth>=0.001)
     if not valid.any():
       logging.info(f"valid is empty")
@@ -157,9 +161,10 @@ class FoundationPose:
     return center.reshape(3)
 
 
-  def register(self, K, rgb, depth, ob_mask, ob_id=None, glctx=None, iteration=5):
+  def register(self, K, rgb, depth, ob_mask, ob_id=None, glctx=None, iteration=5, bbox_xyxy=None):
     '''Copmute pose from given pts to self.pcd
     @pts: (N,3) np array, downsampled scene points
+    @bbox_xyxy: detector box in pixels; its center is used as the pixel center of the object
     '''
     set_seed(0)
     logging.info('Welcome')
@@ -173,8 +178,8 @@ class FoundationPose:
       else:
         self.glctx = glctx
 
-    depth = erode_depth(depth, radius=2, device='cuda')
-    depth = bilateral_filter_depth(depth, radius=2, device='cuda')
+    # depth = erode_depth(depth, radius=2, device='cuda')
+    # depth = bilateral_filter_depth(depth, radius=2, device='cuda')
 
     if self.debug>=2:
       xyz_map = depth2xyzmap(depth, K)
@@ -188,7 +193,7 @@ class FoundationPose:
     if valid.sum()<4:
       logging.info(f'valid too small, return')
       pose = np.eye(4)
-      pose[:3,3] = self.guess_translation(depth=depth, mask=ob_mask, K=K)
+      pose[:3,3] = self.guess_translation(depth=depth, mask=ob_mask, K=K, bbox_xyxy=bbox_xyxy)
       self.last_timing_ms['total'] = (timing_clock() - t_start) * 1000.0
       return pose
 
@@ -205,10 +210,10 @@ class FoundationPose:
     self.ob_mask = ob_mask
 
     t_hypo = timing_clock()
-    poses = self.generate_random_pose_hypo(K=K, rgb=rgb, depth=depth, mask=ob_mask, scene_pts=None)
+    poses = self.generate_random_pose_hypo(K=K, rgb=rgb, depth=depth, mask=ob_mask, scene_pts=None, bbox_xyxy=bbox_xyxy)
     poses = poses.data.cpu().numpy()
     logging.info(f'poses:{poses.shape}')
-    center = self.guess_translation(depth=depth, mask=ob_mask, K=K)
+    center = self.guess_translation(depth=depth, mask=ob_mask, K=K, bbox_xyxy=bbox_xyxy)
 
     poses = torch.as_tensor(poses, device='cuda', dtype=torch.float)
     poses[:,:3,3] = torch.as_tensor(center.reshape(1,3), device='cuda')
@@ -269,8 +274,8 @@ class FoundationPose:
     logging.info("Welcome")
 
     depth = torch.as_tensor(depth, device='cuda', dtype=torch.float)
-    depth = erode_depth(depth, radius=2, device='cuda')
-    depth = bilateral_filter_depth(depth, radius=2, device='cuda')
+    # depth = erode_depth(depth, radius=2, device='cuda')
+    # depth = bilateral_filter_depth(depth, radius=2, device='cuda')
     logging.info("depth processing done")
 
     xyz_map = depth2xyzmap_batch(depth[None], torch.as_tensor(K, dtype=torch.float, device='cuda')[None], zfar=np.inf)[0]

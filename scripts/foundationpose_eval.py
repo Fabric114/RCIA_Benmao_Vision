@@ -14,6 +14,7 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.bbox_depth_mask import bbox_depth_mask  # noqa: E402
 from scripts.pose_eval_metrics import pose_errors  # noqa: E402
 
 
@@ -52,7 +53,7 @@ def cmd_prepare(args):
             torch.cuda.synchronize()
         return time.perf_counter()
 
-    mask_gen = MaskGenerator(yolo_path=args.yolo_model, sam_ckpt=args.sam_checkpoint, sam_type=args.sam_model_type)
+    mask_gen = MaskGenerator(yolo_path=args.yolo_model)
     for frame_dir in list_frame_dirs(args.frames_root):
         color = cv2.imread(str(frame_dir / "color.png"), cv2.IMREAD_COLOR)
         t0 = now()
@@ -62,24 +63,18 @@ def cmd_prepare(args):
             logging.warning(f"{frame_dir.name}: no detection, skipped")
             continue
         x1, y1, x2, y2, conf, _ = max(dets, key=lambda d: (d[2] - d[0]) * (d[3] - d[1]))
-        t2 = now()
-        mask_gen.predictor.set_image(cv2.cvtColor(color, cv2.COLOR_BGR2RGB))
-        masks, _, _ = mask_gen.predictor.predict(box=np.array([x1, y1, x2, y2]), multimask_output=False)
-        t3 = now()
-        cv2.imwrite(str(frame_dir / "mask_sam.png"), masks[0].astype(np.uint8) * 255)
         (frame_dir / "bbox.json").write_text(
             json.dumps(
                 {
                     "bbox_xyxy": [float(x1), float(y1), float(x2), float(y2)],
                     "conf": float(conf),
                     "yolo_ms": (t1 - t0) * 1000.0,
-                    "mask_ms": (t3 - t2) * 1000.0,
                 },
                 indent=2,
             ),
             encoding="utf-8",
         )
-        print(f"{frame_dir.name}: bbox={[x1, y1, x2, y2]} conf={conf:.3f} mask_pixels={int(masks[0].sum())}")
+        print(f"{frame_dir.name}: bbox={[x1, y1, x2, y2]} conf={conf:.3f}")
 
 
 def cmd_run(args):
@@ -93,20 +88,32 @@ def cmd_run(args):
         "frames": {},
     }
     for frame_dir in list_frame_dirs(args.frames_root):
-        if args.mask_source == "sam_file":
+        color = cv2.imread(str(frame_dir / "color.png"), cv2.IMREAD_COLOR)
+        rgb = np.ascontiguousarray(color[..., ::-1])
+        depth = read_depth_m(frame_dir / "depth.png")
+        K = read_camera_k(frame_dir / "camera_info.yaml")
+        bbox_path = frame_dir / "bbox.json"
+        if args.mask_source == "bbox_depth":
+            if not bbox_path.exists():
+                logging.warning(f"{frame_dir.name}: bbox.json missing, skipped")
+                continue
+            bbox = json.loads(bbox_path.read_text(encoding="utf-8"))["bbox_xyxy"]
+            t0 = time.perf_counter()
+            mask = bbox_depth_mask(depth, bbox, center_frac=args.mask_center_frac, half_window_m=args.depth_window_half_m)
+            mask_ms = (time.perf_counter() - t0) * 1000.0
+        elif args.mask_source == "sam_file":
             mask_path = frame_dir / "mask_sam.png"
             if not mask_path.exists():
                 logging.warning(f"{frame_dir.name}: {mask_path.name} missing, skipped")
                 continue
             mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE) > 0
+            bbox = None
+            mask_ms = 0.0
         else:
             raise ValueError(f"unknown mask_source: {args.mask_source}")
-        color = cv2.imread(str(frame_dir / "color.png"), cv2.IMREAD_COLOR)
-        rgb = np.ascontiguousarray(color[..., ::-1])
-        depth = read_depth_m(frame_dir / "depth.png")
-        K = read_camera_k(frame_dir / "camera_info.yaml")
-        pose = est.register(K=K, rgb=rgb, depth=depth, ob_mask=mask, iteration=args.est_refine_iter)
+        pose = est.register(K=K, rgb=rgb, depth=depth, ob_mask=mask, iteration=args.est_refine_iter, bbox_xyxy=bbox)
         timing = dict(est.last_timing_ms)
+        timing["mask"] = mask_ms
         timing.update({f"refine_{k}": v for k, v in est.refiner.last_timing_ms.items()})
         timing.update({f"score_{k}": v for k, v in est.scorer.last_timing_ms.items()})
         results["frames"][frame_dir.name] = {"pose": np.asarray(pose).tolist(), "timing_ms": timing}
@@ -160,14 +167,14 @@ def build_parser():
     p.add_argument("--yolo_model", default=str(PROJECT_ROOT / "models/yolo/best_openvino_model"))
     p.add_argument("--target_class", type=int, default=0)
     p.add_argument("--conf", type=float, default=0.75)
-    p.add_argument("--sam_checkpoint", default=str(PROJECT_ROOT / "models/sam/sam_vit_b_01ec64.pth"))
-    p.add_argument("--sam_model_type", default="vit_b")
     p.set_defaults(func=cmd_prepare)
 
     p = sub.add_parser("run")
     p.add_argument("--frames_root", required=True)
     p.add_argument("--out", required=True)
-    p.add_argument("--mask_source", choices=["sam_file"], default="sam_file")
+    p.add_argument("--mask_source", choices=["bbox_depth", "sam_file"], default="bbox_depth")
+    p.add_argument("--mask_center_frac", type=float, default=0.35)
+    p.add_argument("--depth_window_half_m", type=float, default=0.11)
     p.add_argument("--est_refine_iter", type=int, default=5)
     p.add_argument("--symmetry_mode", choices=["none", "z12"], default="none")
     p.add_argument("--mesh_file", default=str(PROJECT_ROOT / "models/object/Str3D.obj"))

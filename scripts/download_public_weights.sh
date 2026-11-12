@@ -4,10 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
 
-SAM_DIR="${PROJECT_ROOT}/models/sam"
 FP_WEIGHTS_DIR="${PROJECT_ROOT}/foundation_pose/weights"
 
-mkdir -p "${SAM_DIR}" "${FP_WEIGHTS_DIR}"
+mkdir -p "${FP_WEIGHTS_DIR}"
 
 download_file() {
   local url="$1"
@@ -55,10 +54,6 @@ snapshot_download(
 )
 PY
 }
-
-download_file \
-  "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth" \
-  "${SAM_DIR}/sam_vit_b_01ec64.pth"
 
 download_foundationpose_weights
 

@@ -5,7 +5,7 @@ This package is the first implementation slice of方案C: the RealSense camera i
 ## Contract
 
 - The camera publisher is the only process that opens the D435.
-- `foundationpose_init_node.py` subscribes to RGB-D frames, matches depth to each color frame by timestamp, runs YOLO/SAM/FoundationPose, and publishes `/energy/initial_pose` with that color frame stamp.
+- `foundationpose_init_node.py` subscribes to RGB-D frames, matches depth to each color frame by timestamp, runs YOLO/depth-window mask/FoundationPose, and publishes `/energy/initial_pose` with that color frame stamp.
 - `m3t_ros_tracking_node` subscribes to RGB-D frames and `/energy/initial_pose`, pins its first M3T setup frame to the pose stamp, then continues tracking from live ROS-backed camera adapters.
 - Diagnostic images are written to `runtime/foundationpose_ros_debug/diagnostics/`: `yolo_latest.png`, `yolo_selected.png`, and one-shot `foundationpose_initialization.png`.
 - The M3T color viewer keeps the existing colored model overlay and adds an XYZ coordinate frame at the tracked model centroid.

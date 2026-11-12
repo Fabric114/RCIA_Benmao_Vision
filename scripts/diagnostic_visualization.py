@@ -58,7 +58,7 @@ def make_placeholder_panel(label, panel_size=(640, 480)):
 
 def compose_pipeline_view(
     yolo=None,
-    sam=None,
+    mask=None,
     foundationpose=None,
     m3t=None,
     panel_size=(640, 480),
@@ -68,7 +68,7 @@ def compose_pipeline_view(
     panel_statuses = panel_statuses or {}
     panels = {
         "yolo": _draw_panel_title(_fit_panel(yolo, panel_size), "YOLO live monitor"),
-        "sam": _draw_panel_title(_fit_panel(sam, panel_size), "SAM last mask"),
+        "mask": _draw_panel_title(_fit_panel(mask, panel_size), "Depth-window mask"),
         "foundationpose": _draw_panel_title(
             _fit_panel(foundationpose, panel_size),
             "FoundationPose last init",
@@ -85,7 +85,7 @@ def compose_pipeline_view(
                 str(label),
                 stale=bool(status.get("stale", False)),
             )
-    top = np.concatenate([panels["yolo"], panels["sam"]], axis=1)
+    top = np.concatenate([panels["yolo"], panels["mask"]], axis=1)
     bottom = np.concatenate([panels["foundationpose"], panels["m3t"]], axis=1)
     view = np.concatenate([top, bottom], axis=0)
     if tracking_status is not None:

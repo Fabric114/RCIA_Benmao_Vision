@@ -90,8 +90,8 @@ class FoundationPoseInitNode(Node):
         self.declare_parameter("output_frame_id", "camera_color_optical_frame")
         self.declare_parameter("mesh_file", str(PROJECT_ROOT / "models/object/Str3D.obj"))
         self.declare_parameter("yolo_model", str(PROJECT_ROOT / "models/yolo/best_openvino_model"))
-        self.declare_parameter("sam_checkpoint", str(PROJECT_ROOT / "models/sam/sam_vit_b_01ec64.pth"))
-        self.declare_parameter("sam_model_type", "vit_b")
+        self.declare_parameter("mask_center_frac", 0.35)
+        self.declare_parameter("depth_window_half_m", 0.11)
         self.declare_parameter("target_class", -1)
         self.declare_parameter("detect_conf", 0.75)
         self.declare_parameter("register_conf", 0.75)
@@ -111,7 +111,7 @@ class FoundationPoseInitNode(Node):
         self.declare_parameter("show_diagnostic_windows", False)
         self.declare_parameter("diagnostic_yolo_topic", "/energy/diagnostics/yolo")
         self.declare_parameter("yolo_detections_topic", "/energy/yolo_detections")
-        self.declare_parameter("diagnostic_sam_topic", "/energy/diagnostics/sam")
+        self.declare_parameter("diagnostic_mask_topic", "/energy/diagnostics/mask")
         self.declare_parameter(
             "diagnostic_foundationpose_topic",
             "/energy/diagnostics/foundationpose",
@@ -186,9 +186,9 @@ class FoundationPoseInitNode(Node):
             self.get_parameter("yolo_detections_topic").value,
             20,
         )
-        self.sam_diag_pub = self.create_publisher(
+        self.mask_diag_pub = self.create_publisher(
             Image,
-            self.get_parameter("diagnostic_sam_topic").value,
+            self.get_parameter("diagnostic_mask_topic").value,
             10,
         )
         self.foundationpose_diag_pub = self.create_publisher(
@@ -244,9 +244,9 @@ class FoundationPoseInitNode(Node):
         self.get_logger().info("Loading FoundationPose models for ROS2 initialization")
         self.mask_gen = MaskGenerator(
             yolo_path=self.get_parameter("yolo_model").value,
-            sam_ckpt=self.get_parameter("sam_checkpoint").value,
-            sam_type=self.get_parameter("sam_model_type").value,
             device="cuda",
+            center_frac=float(self.get_parameter("mask_center_frac").value),
+            half_window_m=float(self.get_parameter("depth_window_half_m").value),
         )
         self.estimator = self._create_estimator()
         self.get_logger().info("FoundationPose ROS2 initializer is ready")
@@ -483,11 +483,12 @@ class FoundationPoseInitNode(Node):
         )
         mask, bbox = self.mask_gen.generate(
             color,
+            depth,
             target_class=self.target_class,
             conf=float(self.get_parameter("register_conf").value),
         )
         if mask.sum() == 0:
-            self.get_logger().warning("YOLO+SAM returned empty mask; skipping this frame")
+            self.get_logger().warning("YOLO box has no valid depth near the object; skipping this frame")
             return
 
         pose = self.estimator.register(
@@ -496,6 +497,7 @@ class FoundationPoseInitNode(Node):
             depth=depth,
             ob_mask=mask,
             iteration=int(self.get_parameter("est_refine_iter").value),
+            bbox_xyxy=bbox,
         )
         pose = self._canonicalize_pose(pose)
         self._publish_timing(
@@ -780,7 +782,7 @@ class FoundationPoseInitNode(Node):
 
         cv2.putText(
             detection_vis,
-            "YOLO/SAM used for FoundationPose init",
+            "YOLO + depth-window mask used for FoundationPose init",
             (10, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
@@ -799,7 +801,7 @@ class FoundationPoseInitNode(Node):
             cv2.LINE_AA,
         )
         canvas = np.concatenate([detection_vis, pose_vis], axis=1)
-        self._publish_diag_image(self.sam_diag_pub, detection_vis, header)
+        self._publish_diag_image(self.mask_diag_pub, detection_vis, header)
         self._publish_diag_image(self.foundationpose_diag_pub, pose_vis, header)
         save_debug_image(self._diagnostic_dir() / "foundationpose_initialization.png", canvas)
         self._maybe_show("FoundationPose init diagnostics", canvas)

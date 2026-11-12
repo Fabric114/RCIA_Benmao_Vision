@@ -86,7 +86,6 @@ python -m pip install \
   tqdm \
   ultralytics==8.4.53 \
   ultralytics-thop \
-  segment-anything==1.0 \
   pyrealsense2==2.56.5.9235 \
   h5py \
   pyrender==0.1.45 \

@@ -30,7 +30,6 @@ def main():
     require_import("torchvision")
     require_import("cv2")
     require_import("ultralytics")
-    require_import("segment_anything")
     require_import("pyrealsense2")
     require_import("nvdiffrast.torch")
     require_import("pytorch3d.transforms")

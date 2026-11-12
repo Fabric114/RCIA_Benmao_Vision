@@ -25,6 +25,7 @@ try:
     from auto_register import AutoRegisterGate
 except ImportError:
     from scripts.auto_register import AutoRegisterGate
+from scripts.foundationpose_init import MaskGenerator
 
 # D435 摄像头内参
 K_D435 = np.array([
@@ -32,77 +33,6 @@ K_D435 = np.array([
     [0, 606.2304160969798, 239.7231533262084],
     [0, 0, 1]
 ], dtype=np.float64)
-
-
-class MaskGenerator:
-    """YOLO 检测 + SAM 精细分割，生成目标物体遮罩"""
-
-    def __init__(self, yolo_path, sam_ckpt, sam_type='vit_b', device='cuda'):
-        from ultralytics import YOLO
-        from segment_anything import sam_model_registry, SamPredictor
-
-        self.device = device
-        self.yolo = YOLO(yolo_path)
-        self.sam = sam_model_registry[sam_type](checkpoint=sam_ckpt)
-        self.sam.to(device=device)
-        self.predictor = SamPredictor(self.sam)
-        self.image_set = False
-
-    def detect_only(self, color_bgr, target_class=None, conf=0.3):
-        color_rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
-        results = self.yolo.predict(color_rgb, conf=conf, verbose=False)
-        if len(results) == 0 or results[0].boxes is None or len(results[0].boxes) == 0:
-            return []
-        dets = []
-        for box in results[0].boxes:
-            cls = int(box.cls[0]) if box.cls is not None else None
-            if target_class is not None and cls != target_class:
-                continue
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-            conf_val = float(box.conf[0]) if box.conf is not None else 1.0
-            dets.append((int(x1), int(y1), int(x2), int(y2), conf_val, cls))
-        return dets
-
-    def generate(self, color_bgr, target_class=None, conf=0.7):
-        """对 BGR 图像运行 YOLO + SAM，返回最大检测框的遮罩"""
-        H, W = color_bgr.shape[:2]
-        mask = np.zeros((H, W), dtype=bool)
-
-        # 1. YOLO 检测
-        color_rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
-        results = self.yolo.predict(color_rgb, conf=conf, verbose=False)
-
-        if len(results) == 0 or results[0].boxes is None or len(results[0].boxes) == 0:
-            return mask, None
-
-        # 选择最大检测框（可按类别过滤）
-        boxes = results[0].boxes
-        best_box = None
-        best_area = 0
-
-        for box in boxes:
-            cls = int(box.cls[0]) if box.cls is not None else None
-            if target_class is not None and cls != target_class:
-                continue
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-            area = (x2 - x1) * (y2 - y1)
-            if area > best_area:
-                best_area = area
-                best_box = (x1, y1, x2, y2)
-
-        if best_box is None:
-            return mask, None
-
-        # 2. 用 bbox 提示 SAM 精修遮罩
-        x1, y1, x2, y2 = best_box
-        self.predictor.set_image(color_rgb)
-        masks, scores, _ = self.predictor.predict(
-            box=np.array([x1, y1, x2, y2]),
-            multimask_output=False
-        )
-        mask = masks[0].astype(bool)
-        bbox_int = (int(x1), int(y1), int(x2), int(y2))
-        return mask, bbox_int
 
 
 def read_frames_from_dir(data_dir):
@@ -141,9 +71,9 @@ def run_offline(args, est, mesh, to_origin, bbox_vis, K):
     """离线模式：处理磁盘上保存的帧"""
     mask_gen = MaskGenerator(
         yolo_path=args.yolo_model,
-        sam_ckpt=args.sam_checkpoint,
-        sam_type=args.sam_model_type,
-        device='cuda'
+        device='cuda',
+        center_frac=args.mask_center_frac,
+        half_window_m=args.depth_window_half_m,
     )
     rgb_files, depth_files = read_frames_from_dir(args.data_dir)
 
@@ -152,15 +82,15 @@ def run_offline(args, est, mesh, to_origin, bbox_vis, K):
         color, depth = read_frame_pair(rgb_files[i], depth_files[i])
 
         if i == 0:
-            mask, bbox = mask_gen.generate(color, target_class=args.target_class)
+            mask, bbox = mask_gen.generate(color, depth, target_class=args.target_class)
             if mask.sum() == 0:
-                logging.warning('YOLO+SAM 在第一帧未检测到目标！使用中心裁剪。')
+                logging.warning('YOLO 在第一帧未检测到有效深度的目标！使用中心裁剪。')
                 H, W = color.shape[:2]
                 mask[H//4:3*H//4, W//4:3*W//4] = 1
             else:
                 logging.info(f'检测框: {bbox}, 遮罩面积: {mask.sum()}')
             pose = est.register(K=K, rgb=color, depth=depth, ob_mask=mask,
-                              iteration=args.est_refine_iter)
+                              iteration=args.est_refine_iter, bbox_xyxy=bbox)
             pose_output = Path(args.pose_output)
             pose_output.parent.mkdir(parents=True, exist_ok=True)
             np.savetxt(pose_output, pose.reshape(4, 4))
@@ -192,9 +122,9 @@ def run_live(args, est, mesh, to_origin, bbox_vis, K):
 
     mask_gen = MaskGenerator(
         yolo_path=args.yolo_model,
-        sam_ckpt=args.sam_checkpoint,
-        sam_type=args.sam_model_type,
-        device='cuda'
+        device='cuda',
+        center_frac=args.mask_center_frac,
+        half_window_m=args.depth_window_half_m,
     )
 
     pipeline = rs.pipeline()
@@ -285,21 +215,22 @@ def run_live(args, est, mesh, to_origin, bbox_vis, K):
                         logging.info(f'用户确认检测，开始注册位姿...')
                     continue
 
-            # ---- 阶段2：注册初始位姿（第一帧用 SAM 精修遮罩） ----
+            # ---- 阶段2：注册初始位姿（遮罩由 YOLO 框内深度窗口生成） ----
             if phase == 'register':
                 mask, bbox = mask_gen.generate(
                     color,
+                    depth,
                     target_class=args.target_class,
                     conf=args.register_conf
                 )
                 if mask.sum() == 0:
-                    logging.warning('YOLO+SAM 未检测到目标！使用中心裁剪。')
+                    logging.warning('YOLO 未检测到有效深度的目标！使用中心裁剪。')
                     H, W = color.shape[:2]
                     mask[H//4:3*H//4, W//4:3*W//4] = 1
                 else:
                     logging.info(f'检测框: {bbox}, 遮罩面积: {mask.sum()}')
                 pose = est.register(K=K, rgb=color, depth=depth, ob_mask=mask,
-                                  iteration=args.est_refine_iter)
+                                  iteration=args.est_refine_iter, bbox_xyxy=bbox)
                 logging.info(f'初始位姿:\n{pose}')
                 # 保存位姿供 M3T 跟踪器读取
                 pose_output = Path(args.pose_output)
@@ -343,16 +274,16 @@ if __name__ == '__main__':
                         default=str(PROJECT_ROOT / 'models/object/Str3D.obj'))
     parser.add_argument('--yolo_model', type=str,
                         default=str(PROJECT_ROOT / 'models/yolo/best.pt'))
-    parser.add_argument('--sam_checkpoint', type=str,
-                        default=str(PROJECT_ROOT / 'models/sam/sam_vit_b_01ec64.pth'))
-    parser.add_argument('--sam_model_type', type=str, default='vit_b',
-                        choices=['vit_b', 'vit_l', 'vit_h'])
+    parser.add_argument('--mask_center_frac', type=float, default=0.35,
+                        help='框中心区域比例，用于取参考深度')
+    parser.add_argument('--depth_window_half_m', type=float, default=0.11,
+                        help='遮罩深度窗口半宽（米）')
     parser.add_argument('--target_class', type=int, default=None,
                         help='要跟踪的 YOLO 类别 ID（None=选择最大检测框）')
     parser.add_argument('--detect_conf', type=float, default=0.7,
                         help='检测阶段 YOLO 最低置信度')
     parser.add_argument('--register_conf', type=float, default=None,
-                        help='送入 SAM/FoundationPose 注册前的 YOLO 最低置信度（默认同 detect_conf）')
+                        help='送入 FoundationPose 注册前的 YOLO 最低置信度（默认同 detect_conf）')
     parser.add_argument('--auto_register', action='store_true',
                         help='检测置信度稳定达标后自动注册，不等待 SPACE')
     parser.add_argument('--auto_register_stable_frames', type=int, default=3,

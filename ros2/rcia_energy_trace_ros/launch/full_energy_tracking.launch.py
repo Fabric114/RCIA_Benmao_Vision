@@ -115,7 +115,7 @@ def generate_launch_description():
     frame_history_size = LaunchConfiguration("frame_history_size")
     start_frame_tolerance_ms = LaunchConfiguration("start_frame_tolerance_ms")
     yolo_topic = LaunchConfiguration("yolo_topic")
-    sam_topic = LaunchConfiguration("sam_topic")
+    mask_topic = LaunchConfiguration("mask_topic")
     foundationpose_topic = LaunchConfiguration("foundationpose_topic")
     m3t_topic = LaunchConfiguration("m3t_topic")
     pipeline_topic = LaunchConfiguration("pipeline_topic")
@@ -160,7 +160,7 @@ def generate_launch_description():
         DeclareLaunchArgument("tracking_health_topic", default_value="/energy/tracking_health"),
         DeclareLaunchArgument("timing_topic", default_value="/energy/timing_events"),
         DeclareLaunchArgument("yolo_topic", default_value="/energy/diagnostics/yolo"),
-        DeclareLaunchArgument("sam_topic", default_value="/energy/diagnostics/sam"),
+        DeclareLaunchArgument("mask_topic", default_value="/energy/diagnostics/mask"),
         DeclareLaunchArgument(
             "foundationpose_topic",
             default_value="/energy/diagnostics/foundationpose",
@@ -482,7 +482,7 @@ def generate_launch_description():
             parameters=[{
                 "color_topic": color_topic,
                 "yolo_topic": yolo_topic,
-                "sam_topic": sam_topic,
+                "mask_topic": mask_topic,
                 "foundationpose_topic": foundationpose_topic,
                 "m3t_topic": m3t_topic,
                 "tracking_health_topic": tracking_health_topic,

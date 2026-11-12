@@ -32,7 +32,7 @@ class PipelineVisualizerNode(Node):
         self.latest = {
             "color": None,
             "yolo": None,
-            "sam": None,
+            "mask": None,
             "foundationpose": None,
             "m3t": None,
             "tracking_status": None,
@@ -40,14 +40,14 @@ class PipelineVisualizerNode(Node):
         self.latest_received_ns = {
             "color": 0,
             "yolo": 0,
-            "sam": 0,
+            "mask": 0,
             "foundationpose": 0,
             "m3t": 0,
         }
 
         self.declare_parameter("color_topic", "/camera/color/image_raw")
         self.declare_parameter("yolo_topic", "/energy/diagnostics/yolo")
-        self.declare_parameter("sam_topic", "/energy/diagnostics/sam")
+        self.declare_parameter("mask_topic", "/energy/diagnostics/mask")
         self.declare_parameter(
             "foundationpose_topic",
             "/energy/diagnostics/foundationpose",
@@ -76,8 +76,8 @@ class PipelineVisualizerNode(Node):
         )
         self.create_subscription(
             Image,
-            self.get_parameter("sam_topic").value,
-            self._image_cb("sam"),
+            self.get_parameter("mask_topic").value,
+            self._image_cb("mask"),
             10,
         )
         self.create_subscription(
@@ -130,7 +130,7 @@ class PipelineVisualizerNode(Node):
         with self.lock:
             color = None if self.latest["color"] is None else self.latest["color"].copy()
             yolo = None if self.latest["yolo"] is None else self.latest["yolo"].copy()
-            sam = None if self.latest["sam"] is None else self.latest["sam"].copy()
+            mask = None if self.latest["mask"] is None else self.latest["mask"].copy()
             foundationpose = (
                 None
                 if self.latest["foundationpose"] is None
@@ -150,7 +150,7 @@ class PipelineVisualizerNode(Node):
         )
         view = compose_pipeline_view(
             yolo=yolo,
-            sam=sam,
+            mask=mask,
             foundationpose=foundationpose,
             m3t=m3t,
             panel_size=panel_size,
@@ -171,7 +171,7 @@ class PipelineVisualizerNode(Node):
     def _panel_statuses(self, now_ns, received_ns):
         stale_after_s = max(0.1, float(self.get_parameter("stale_panel_after_s").value))
         labels = {
-            "sam": "waiting for FoundationPose request",
+            "mask": "waiting for FoundationPose request",
             "foundationpose": "waiting for accepted init",
             "m3t": "waiting for supervisor start",
         }

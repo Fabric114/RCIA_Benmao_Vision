@@ -9,7 +9,7 @@
 ```text
 RealSense D435 RGB-D
   -> YOLO 2D 检测
-  -> SAM 分割
+  -> 深度窗口 mask
   -> FoundationPose 6DoF 初始化
   -> M3T/SRT3D 风格模型跟踪
   -> tracking supervisor 状态融合与重初始化管理
@@ -81,7 +81,6 @@ models/yolo/best-v2.pt
 以下公开权重不直接提交到 Git，使用脚本下载：
 
 ```text
-models/sam/sam_vit_b_01ec64.pth
 foundation_pose/weights/*/model_best.pth
 ```
 
@@ -93,8 +92,6 @@ bash scripts/download_public_weights.sh
 
 公开来源：
 
-- SAM 官方仓库：https://github.com/facebookresearch/segment-anything
-- SAM ViT-B 权重：https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 - FoundationPose 官方仓库：https://github.com/NVlabs/FoundationPose
 - FoundationPose 官方 Google Drive 权重：https://drive.google.com/drive/folders/1DFezOAD0oD1BblsXVxqDsl8fj0qzB82i?usp=sharing
 - FoundationPose HuggingFace 镜像：https://huggingface.co/gpue/foundationpose-weights
@@ -107,7 +104,7 @@ RCIA_Energy_trace/
 ├── README.md               # 项目说明、系统架构、运行流程和开源注意事项
 ├── foundation_pose/        # FoundationPose 本地集成代码、推理组件和权重目录
 ├── m3t_app/                # 旧版非 ROS M3T 跟踪 demo，保留作最小 C++ 示例
-├── models/                 # 目标 3D 模型、M3T 预计算模型、YOLO/SAM 权重
+├── models/                 # 目标 3D 模型、M3T 预计算模型、YOLO 权重
 ├── ros2/                   # ROS2 功能包，包含相机发布、初始化、跟踪、状态机和可视化节点
 ├── scripts/                # 算法工具、状态融合、验证逻辑、LINEMOD 实验和环境脚本
 ├── tests/                  # Python 单元测试和模块级回归测试
@@ -145,16 +142,16 @@ object_in_camera_color_optical_frame
 
 YOLO 的作用是：
 - 在初始化前提供目标 bbox。
-- 给 SAM 一个分割提示区域。
+- 给深度窗口 mask 提供框范围。
 - 给 tracking supervisor 一个“目标可能存在”的观测信号。
 
 注意：YOLO 不是 6DoF 位姿来源，也不是目标是否存在的绝对真值。因为我的训练数据有限，当目标被遮挡、旋转到特殊角度、只露出侧面或远离训练分布时，YOLO 可能漏检；也可能在背景上误检。
 
-### 3. SAM 分割
+### 3. 深度窗口 mask
 
-SAM 使用 YOLO bbox 生成目标 mask。
+在 YOLO bbox 内取框中心 35% 区域的有效深度中位数作为参考深度，保留深度与参考值相差不超过 0.11 m 的像素。不再使用 SAM 分割。
 
-SAM mask 的作用是：
+深度窗口 mask 的作用是：
 
 - 限制 FoundationPose 注册区域。
 - 减少背景对 6DoF 初始化的干扰。
@@ -168,7 +165,7 @@ FoundationPose 使用：
 - RGB 图像。
 - 对齐深度图。
 - 相机内参。
-- SAM mask。
+- 深度窗口 mask。
 - `models/object/Str3D.obj`。
 - FoundationPose 预训练权重。
 
