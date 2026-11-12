@@ -60,7 +60,7 @@ def vis_batch_data_scores(pose_data, ids, scores, pad_margin=5):
 
 
 @torch.no_grad()
-def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_ratio, normal_map=None, mesh_diameter=None, glctx=None, mesh_tensors=None, dataset:TripletH5Dataset=None, cfg=None, timing=None):
+def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_ratio, normal_map=None, mesh_diameter=None, glctx=None, mesh_tensors=None, dataset:TripletH5Dataset=None, cfg=None, timing=None, device='cuda'):
   logging.info("Welcome make_crop_data_batch")
   t_start = timing_clock() if timing is not None else None
   H,W = depth.shape[:2]
@@ -71,14 +71,14 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
   logging.info("make tf_to_crops done")
 
   B = len(ob_in_cams)
-  poseAs = torch.as_tensor(ob_in_cams, dtype=torch.float, device='cuda')
+  poseAs = torch.as_tensor(ob_in_cams, dtype=torch.float, device=device)
 
   bs = 512
   rgb_rs = []
   depth_rs = []
   xyz_map_rs = []
 
-  bbox2d_crop = torch.as_tensor(np.array([0, 0, cfg['input_resize'][0]-1, cfg['input_resize'][1]-1]).reshape(2,2), device='cuda', dtype=torch.float)
+  bbox2d_crop = torch.as_tensor(np.array([0, 0, cfg['input_resize'][0]-1, cfg['input_resize'][1]-1]).reshape(2,2), device=device, dtype=torch.float)
   bbox2d_ori = transform_pts(bbox2d_crop, tf_to_crops.inverse()[:,None]).reshape(-1,4)
 
   if timing is not None:
@@ -97,8 +97,8 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
   if timing is not None:
     t_warp = timing_clock()
 
-  rgbBs = kornia.geometry.transform.warp_perspective(torch.as_tensor(rgb, dtype=torch.float, device='cuda').permute(2,0,1)[None].expand(B,-1,-1,-1), tf_to_crops, dsize=render_size, mode='bilinear', align_corners=False)
-  depthBs = kornia.geometry.transform.warp_perspective(torch.as_tensor(depth, dtype=torch.float, device='cuda')[None,None].expand(B,-1,-1,-1), tf_to_crops, dsize=render_size, mode='nearest', align_corners=False)
+  rgbBs = kornia.geometry.transform.warp_perspective(torch.as_tensor(rgb, dtype=torch.float, device=device).permute(2,0,1)[None].expand(B,-1,-1,-1), tf_to_crops, dsize=render_size, mode='bilinear', align_corners=False)
+  depthBs = kornia.geometry.transform.warp_perspective(torch.as_tensor(depth, dtype=torch.float, device=device)[None,None].expand(B,-1,-1,-1), tf_to_crops, dsize=render_size, mode='nearest', align_corners=False)
   if rgb_rs.shape[-2:]!=cfg['input_resize']:
     rgbAs = kornia.geometry.transform.warp_perspective(rgb_rs, tf_to_crops, dsize=render_size, mode='bilinear', align_corners=False)
     depthAs = kornia.geometry.transform.warp_perspective(depth_rs, tf_to_crops, dsize=render_size, mode='nearest', align_corners=False)
@@ -115,7 +115,7 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
   normalBs = None
 
   Ks = torch.as_tensor(K, dtype=torch.float).reshape(1,3,3).expand(len(rgbAs),3,3)
-  mesh_diameters = torch.ones((len(rgbAs)), dtype=torch.float, device='cuda')*mesh_diameter
+  mesh_diameters = torch.ones((len(rgbAs)), dtype=torch.float, device=device)*mesh_diameter
 
   pose_data = BatchPoseData(rgbAs=rgbAs, rgbBs=rgbBs, depthAs=depthAs, depthBs=depthBs, normalAs=normalAs, normalBs=normalBs, poseA=poseAs, xyz_mapAs=xyz_mapAs, tf_to_crops=tf_to_crops, Ks=Ks, mesh_diameters=mesh_diameters)
   pose_data = dataset.transform_batch(pose_data, H_ori=H, W_ori=W, bound=1)
@@ -130,8 +130,9 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
 
 
 class ScorePredictor:
-  def __init__(self, amp=True):
+  def __init__(self, amp=True, device='cuda'):
     self.amp = amp
+    self.device = device
     self.run_name = "2024-01-11-20-02-45"
 
     model_name = 'model_best.pth'
@@ -159,16 +160,16 @@ class ScorePredictor:
 
     logging.info(f"self.cfg: \n {OmegaConf.to_yaml(self.cfg)}")
 
-    self.dataset = ScoreMultiPairH5Dataset(cfg=self.cfg, mode='test', h5_file=None, max_num_key=1)
-    self.model = ScoreNetMultiPair(cfg=self.cfg, c_in=self.cfg['c_in']).cuda()
+    self.dataset = ScoreMultiPairH5Dataset(cfg=self.cfg, mode='test', h5_file=None, max_num_key=1, device=self.device)
+    self.model = ScoreNetMultiPair(cfg=self.cfg, c_in=self.cfg['c_in']).to(self.device)
 
     logging.info(f"Using pretrained model from {ckpt_dir}")
-    ckpt = torch.load(ckpt_dir)
+    ckpt = torch.load(ckpt_dir, map_location=self.device)
     if 'model' in ckpt:
       ckpt = ckpt['model']
     self.model.load_state_dict(ckpt)
 
-    self.model.cuda().eval()
+    self.model.to(self.device).eval()
     logging.info("init done")
     self.last_timing_ms = {'render': 0.0, 'warp': 0.0, 'net': 0.0}
 
@@ -181,7 +182,7 @@ class ScorePredictor:
     logging.info(f"ob_in_cams:{ob_in_cams.shape}")
     timing = {'render': 0.0, 'warp': 0.0, 'net': 0.0}
     self.last_timing_ms = timing
-    ob_in_cams = torch.as_tensor(ob_in_cams, dtype=torch.float, device='cuda')
+    ob_in_cams = torch.as_tensor(ob_in_cams, dtype=torch.float, device=self.device)
 
     logging.info(f'self.cfg.use_normal:{self.cfg.use_normal}')
     if not self.cfg.use_normal:
@@ -190,12 +191,12 @@ class ScorePredictor:
     logging.info("making cropped data")
 
     if mesh_tensors is None:
-      mesh_tensors = make_mesh_tensors(mesh)
+      mesh_tensors = make_mesh_tensors(mesh, device=self.device)
 
-    rgb = torch.as_tensor(rgb, device='cuda', dtype=torch.float)
-    depth = torch.as_tensor(depth, device='cuda', dtype=torch.float)
+    rgb = torch.as_tensor(rgb, device=self.device, dtype=torch.float)
+    depth = torch.as_tensor(depth, device=self.device, dtype=torch.float)
 
-    pose_data = make_crop_data_batch(self.cfg.input_resize, ob_in_cams, mesh, rgb, depth, K, crop_ratio=self.cfg['crop_ratio'], glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, cfg=self.cfg, mesh_diameter=mesh_diameter, timing=timing)
+    pose_data = make_crop_data_batch(self.cfg.input_resize, ob_in_cams, mesh, rgb, depth, K, crop_ratio=self.cfg['crop_ratio'], glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, cfg=self.cfg, mesh_diameter=mesh_diameter, timing=timing, device=self.device)
 
     def find_best_among_pairs(pose_data:BatchPoseData):
       logging.info(f'pose_data.rgbAs.shape[0]: {pose_data.rgbAs.shape[0]}')
@@ -203,13 +204,13 @@ class ScorePredictor:
       scores = []
       bs = pose_data.rgbAs.shape[0]
       for b in range(0, pose_data.rgbAs.shape[0], bs):
-        A = torch.cat([pose_data.rgbAs[b:b+bs].cuda(), pose_data.xyz_mapAs[b:b+bs].cuda()], dim=1).float()
-        B = torch.cat([pose_data.rgbBs[b:b+bs].cuda(), pose_data.xyz_mapBs[b:b+bs].cuda()], dim=1).float()
+        A = torch.cat([pose_data.rgbAs[b:b+bs].to(self.device), pose_data.xyz_mapAs[b:b+bs].to(self.device)], dim=1).float()
+        B = torch.cat([pose_data.rgbBs[b:b+bs].to(self.device), pose_data.xyz_mapBs[b:b+bs].to(self.device)], dim=1).float()
         if pose_data.normalAs is not None:
-          A = torch.cat([A, pose_data.normalAs.cuda().float()], dim=1)
-          B = torch.cat([B, pose_data.normalBs.cuda().float()], dim=1)
+          A = torch.cat([A, pose_data.normalAs.to(self.device).float()], dim=1)
+          B = torch.cat([B, pose_data.normalBs.to(self.device).float()], dim=1)
         t_net = timing_clock()
-        with torch.cuda.amp.autocast(enabled=self.amp):
+        with torch.cuda.amp.autocast(enabled=self.amp and self.device == 'cuda'):
           output = self.model(A, B, L=len(A))
         scores_cur = output["score_logit"].float().reshape(-1)
         timing['net'] += (timing_clock() - t_net) * 1000.0
@@ -220,8 +221,8 @@ class ScorePredictor:
       return ids, scores
 
     pose_data_iter = pose_data
-    global_ids = torch.arange(len(ob_in_cams), device='cuda', dtype=torch.long)
-    scores_global = torch.zeros((len(ob_in_cams)), dtype=torch.float, device='cuda')
+    global_ids = torch.arange(len(ob_in_cams), device=self.device, dtype=torch.long)
+    scores_global = torch.zeros((len(ob_in_cams)), dtype=torch.float, device=self.device)
 
     while 1:
       ids, scores = find_best_among_pairs(pose_data_iter)
@@ -234,7 +235,8 @@ class ScorePredictor:
     scores = scores_global
 
     logging.info(f'forward done')
-    torch.cuda.empty_cache()
+    if self.device == 'cuda':
+      torch.cuda.empty_cache()
 
     if get_vis:
       logging.info("get_vis...")

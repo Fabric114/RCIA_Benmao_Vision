@@ -22,6 +22,7 @@ class EstimatorConfig:
     debug: int = 0
     debug_dir: str = "runtime/foundationpose_debug"
     symmetry_mode: str = "none"
+    device: str = "cuda"
 
 # 约束能量单元绕z旋转角共12个，每30 1
 def z_symmetry_tfs(step_deg: float = 30.0) -> np.ndarray:
@@ -63,11 +64,12 @@ def build_estimator(cfg: EstimatorConfig) -> EstimatorBundle:
         model_normals=mesh.vertex_normals.copy(),
         symmetry_tfs=symmetry_tfs,
         mesh=mesh,
-        scorer=ScorePredictor(),
-        refiner=PoseRefinePredictor(),
+        scorer=ScorePredictor(device=cfg.device),
+        refiner=PoseRefinePredictor(device=cfg.device),
         debug_dir=cfg.debug_dir,
         debug=int(cfg.debug),
-        glctx=dr.RasterizeCudaContext(),
+        glctx=dr.RasterizeCudaContext() if cfg.device == "cuda" else None,
+        device=cfg.device,
     )
     return EstimatorBundle(
         estimator=estimator,

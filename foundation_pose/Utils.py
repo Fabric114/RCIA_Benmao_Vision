@@ -8,14 +8,20 @@
 
 
 import os, sys, time,torch,pickle,trimesh,itertools,pdb,zipfile,datetime,imageio,gzip,logging,joblib,importlib,uuid,signal,multiprocessing,psutil,subprocess,tarfile,scipy,argparse
-from pytorch3d.transforms import so3_log_map,so3_exp_map,se3_exp_map,se3_log_map,matrix_to_axis_angle,matrix_to_euler_angles,euler_angles_to_matrix, rotation_6d_to_matrix
-from pytorch3d.renderer import FoVPerspectiveCameras, PerspectiveCameras, look_at_view_transform, look_at_rotation, RasterizationSettings, MeshRenderer, MeshRasterizer, BlendParams, SoftSilhouetteShader, HardPhongShader, PointLights, TexturesVertex
-from pytorch3d.renderer.mesh.rasterize_meshes import barycentric_coordinates
-from pytorch3d.renderer.mesh.shader import SoftDepthShader, HardFlatShader
-from pytorch3d.renderer.mesh.textures import Textures
-from pytorch3d.structures import Meshes
+try:
+  from pytorch3d.transforms import so3_log_map,se3_exp_map,se3_log_map,matrix_to_axis_angle,matrix_to_euler_angles,euler_angles_to_matrix
+  from pytorch3d.renderer import FoVPerspectiveCameras, PerspectiveCameras, look_at_view_transform, look_at_rotation, RasterizationSettings, MeshRenderer, MeshRasterizer, BlendParams, SoftSilhouetteShader, HardPhongShader, PointLights, TexturesVertex
+  from pytorch3d.renderer.mesh.rasterize_meshes import barycentric_coordinates
+  from pytorch3d.renderer.mesh.shader import SoftDepthShader, HardFlatShader
+  from pytorch3d.renderer.mesh.textures import Textures
+  from pytorch3d.structures import Meshes
+except (ImportError, OSError):
+  pass
 from scipy.interpolate import griddata
-import nvdiffrast.torch as dr
+try:
+  import nvdiffrast.torch as dr
+except (ImportError, OSError):
+  dr = None
 import torch.nn.functional as F
 import torchvision
 import torch.nn as nn
@@ -37,6 +43,7 @@ import ruamel.yaml
 yaml = ruamel.yaml.YAML()
 code_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(code_dir)
+from learning.rotation_utils import so3_exp_map, rotation_6d_to_matrix
 # sys.path.append(f"{code_dir}/mycpp/build")
 try:
   import kornia
@@ -426,8 +433,8 @@ def depth2xyzmap_batch(depths, Ks, zfar):
   invalid_mask = (depths<0.001) | (depths>zfar)
   H,W = depths.shape[-2:]
   vs,us = torch.meshgrid(torch.arange(0,H),torch.arange(0,W), indexing='ij')
-  vs = vs.reshape(-1).float().cuda()[None].expand(bs,-1)
-  us = us.reshape(-1).float().cuda()[None].expand(bs,-1)
+  vs = vs.reshape(-1).float().to(depths.device)[None].expand(bs,-1)
+  us = us.reshape(-1).float().to(depths.device)[None].expand(bs,-1)
   zs = depths.reshape(bs,-1)
   Ks = Ks[:,None].expand(bs,zs.shape[-1],3,3)
   xs = (us-Ks[...,0,2])*zs/Ks[...,0,0]  #(B,N)
@@ -588,26 +595,25 @@ def compute_crop_window_tf_batch(pts=None, H=None, W=None, poses=None, K=None, c
     top = top.round()
     bottom = bottom.round()
 
-    tf = torch.eye(3)[None].expand(B,-1,-1).contiguous()
+    tf = torch.eye(3, device=left.device)[None].expand(B,-1,-1).contiguous()
     tf[:,0,2] = -left
     tf[:,1,2] = -top
-    new_tf = torch.eye(3)[None].expand(B,-1,-1).contiguous()
+    new_tf = torch.eye(3, device=left.device)[None].expand(B,-1,-1).contiguous()
     new_tf[:,0,0] = out_size[0]/(right-left)
     new_tf[:,1,1] = out_size[1]/(bottom-top)
     tf = new_tf@tf
     return tf
 
   B = len(poses)
-  torch.set_default_tensor_type('torch.cuda.FloatTensor')
   if method=='box_3d':
     radius = mesh_diameter*crop_ratio/2
     offsets = torch.tensor([0,0,0,
                         radius,0,0,
                         -radius,0,0,
                         0,radius,0,
-                        0,-radius,0]).reshape(-1,3)
+                        0,-radius,0], device=poses.device).reshape(-1,3)
     pts = poses[:,:3,3].reshape(-1,1,3)+offsets.reshape(1,-1,3)
-    K = torch.as_tensor(K)
+    K = torch.as_tensor(K, dtype=pts.dtype, device=pts.device)
     projected = (K@pts.reshape(-1,3).T).T
     uvs = projected[:,:2]/projected[:,2:3]
     uvs = uvs.reshape(B, -1, 2)
