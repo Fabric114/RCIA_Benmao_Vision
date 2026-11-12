@@ -23,7 +23,7 @@ class EstimatorConfig:
     debug_dir: str = "runtime/foundationpose_debug"
     symmetry_mode: str = "none"
 
-
+# 约束能量单元绕z旋转角共12个，每30 1
 def z_symmetry_tfs(step_deg: float = 30.0) -> np.ndarray:
     angles = np.radians(np.arange(0.0, 360.0, step_deg))
     tfs = np.tile(np.eye(4), (len(angles), 1, 1))
@@ -56,8 +56,6 @@ def build_estimator(cfg: EstimatorConfig) -> EstimatorBundle:
     set_logging_format()
     set_seed(0)
     mesh = trimesh.load(cfg.mesh_file, process=False)
-    if mesh.vertex_normals is None:
-        mesh.compute_vertex_normals()
     to_origin, extents = trimesh.bounds.oriented_bounds(mesh)
     bbox_vis = np.stack([-extents / 2, extents / 2], axis=0).reshape(2, 3)
     estimator = FoundationPose(
