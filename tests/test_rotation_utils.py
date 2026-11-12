@@ -27,11 +27,12 @@ class RotationUtilsTest(unittest.TestCase):
             np.testing.assert_allclose(torch.det(R).numpy(), 1.0, atol=1e-5)
 
     @unittest.skipUnless(PYTORCH3D_OK, "needs pytorch3d")
-    def test_matches_pytorch3d(self):
-        x = torch.randn(256, 3) * 2
-        d = torch.randn(256, 6)
-        torch.testing.assert_close(so3_exp_map(x), p3d.so3_exp_map(x), atol=1e-5, rtol=1e-5)
-        torch.testing.assert_close(rotation_6d_to_matrix(d), p3d.rotation_6d_to_matrix(d), atol=1e-5, rtol=1e-5)
+    def test_matches_pytorch3d_bitwise(self):
+        for device in ["cpu"] + (["cuda"] if torch.cuda.is_available() else []):
+            x = (torch.randn(4096, 3) * 2).to(device)
+            d = torch.randn(4096, 6).to(device)
+            self.assertTrue(torch.equal(so3_exp_map(x), p3d.so3_exp_map(x)), device)
+            self.assertTrue(torch.equal(rotation_6d_to_matrix(d), p3d.rotation_6d_to_matrix(d)), device)
 
 
 if __name__ == "__main__":

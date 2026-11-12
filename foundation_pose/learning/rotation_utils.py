@@ -2,27 +2,29 @@ import torch
 import torch.nn.functional as F
 
 
-def _skew(v: torch.Tensor) -> torch.Tensor:
-  x, y, z = v.unbind(-1)
-  zero = torch.zeros_like(x)
-  return torch.stack([
-    torch.stack([zero, -z, y], dim=-1),
-    torch.stack([z, zero, -x], dim=-1),
-    torch.stack([-y, x, zero], dim=-1),
-  ], dim=-2)
+def _quaternion_to_matrix(quaternions: torch.Tensor) -> torch.Tensor:
+  r, i, j, k = torch.unbind(quaternions, -1)
+  two_s = 2.0 / (quaternions * quaternions).sum(-1)
+  o = torch.stack((
+    1 - two_s * (j * j + k * k),
+    two_s * (i * j - k * r),
+    two_s * (i * k + j * r),
+    two_s * (i * j + k * r),
+    1 - two_s * (i * i + k * k),
+    two_s * (j * k - i * r),
+    two_s * (i * k - j * r),
+    two_s * (j * k + i * r),
+    1 - two_s * (i * i + j * j),
+  ), -1)
+  return o.reshape(quaternions.shape[:-1] + (3, 3))
 
 
-def so3_exp_map(log_rot: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
-  '''Rodrigues formula, same result as pytorch3d.transforms.so3_exp_map. (N,3) -> (N,3,3)'''
-  theta_sq = (log_rot ** 2).sum(-1)
-  small = theta_sq < eps ** 2
-  safe_theta_sq = torch.where(small, torch.ones_like(theta_sq), theta_sq)
-  theta = torch.sqrt(safe_theta_sq)
-  A = torch.where(small, 1.0 - theta_sq / 6.0, torch.sin(theta) / theta)
-  B = torch.where(small, 0.5 - theta_sq / 24.0, (1.0 - torch.cos(theta)) / safe_theta_sq)
-  W = _skew(log_rot)
-  eye = torch.eye(3, dtype=log_rot.dtype, device=log_rot.device).expand_as(W)
-  return eye + A[..., None, None] * W + B[..., None, None] * (W @ W)
+def so3_exp_map(log_rot: torch.Tensor) -> torch.Tensor:
+  '''Ported from pytorch3d 0.7.9 (axis_angle -> quaternion -> matrix), bit-exact. (N,3) -> (N,3,3)'''
+  angles = torch.norm(log_rot, p=2, dim=-1, keepdim=True)
+  sin_half_angles_over_angles = 0.5 * torch.sinc(angles * 0.5 / torch.pi)
+  quaternions = torch.cat([torch.cos(angles * 0.5), log_rot * sin_half_angles_over_angles], dim=-1)
+  return _quaternion_to_matrix(quaternions)
 
 
 def rotation_6d_to_matrix(d6: torch.Tensor) -> torch.Tensor:
