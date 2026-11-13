@@ -109,6 +109,103 @@ class RendererTest(unittest.TestCase):
             self.renderer.render(K, 480, 640, pose, {**self.mt, "tex": torch.zeros(1, 4, 4, 3)},
                                  output_size=(480, 640))
 
+    def test_framebuffer_resize_releases_old_attachments(self):
+        renderer = ModernglBatchRenderer()
+        renderer._framebuffer(64, 64)
+        old = list(renderer._fbo_attachments)
+        renderer._framebuffer(32, 32)
+        self.assertEqual(len(old), 3)
+        for obj in old:
+            self.assertEqual(type(obj.mglo).__name__, "InvalidObject")
+        self.assertEqual(len(renderer._fbo_attachments), 3)
+        self.assertNotEqual(type(renderer._fbo_attachments[0].mglo).__name__, "InvalidObject")
+
+    def test_release_is_idempotent_and_blocks_render(self):
+        renderer = ModernglBatchRenderer()
+        pose = torch.tensor(cylinder_pose(), dtype=torch.float32)[None]
+        renderer.render(K, 480, 640, pose, self.mt, output_size=(480, 640))
+        renderer.release()
+        renderer.release()
+        with self.assertRaises(RuntimeError):
+            renderer.render(K, 480, 640, pose, self.mt, output_size=(480, 640))
+
+    def test_releasing_one_renderer_keeps_another_working(self):
+        pose = torch.tensor(cylinder_pose(), dtype=torch.float32)[None]
+        a = ModernglBatchRenderer()
+        b = ModernglBatchRenderer()
+        self.addCleanup(a.release)
+        _, before, _ = a.render(K, 480, 640, pose, self.mt, output_size=(480, 640))
+        b.release()
+        _, after, _ = a.render(K, 480, 640, pose, self.mt, output_size=(480, 640))
+        self.assertTrue(torch.equal(before > 0, after > 0))
+        self.assertGreater((after > 0).sum().item(), 1000)
+
+    def test_context_manager_releases(self):
+        with ModernglBatchRenderer() as renderer:
+            pose = torch.tensor(cylinder_pose(), dtype=torch.float32)[None]
+            renderer.render(K, 480, 640, pose, self.mt, output_size=(480, 640))
+        self.assertTrue(renderer._released)
+
+    def test_str3d_bbox_multi_pass_statistics(self):
+        # 用与真实管线相同的逐位姿裁剪 bbox；边缘像素的三角形覆盖翻转会让极少数像素差异较大，所以用占比而不是最大值
+        mesh = trimesh.load(MESH, process=False)
+        mt = Utils.make_mesh_tensors(mesh, device="cpu")
+        poses = torch.tensor(random_poses(20, seed=5), dtype=torch.float32)
+        tf = Utils.compute_crop_window_tf_batch(pts=mesh.vertices, H=480, W=640, poses=poses, K=K, crop_ratio=1.2,
+                                                out_size=(160, 160), method="box_3d",
+                                                mesh_diameter=Utils.compute_mesh_diameter(mesh=mesh))
+        crop = torch.tensor([[0, 0, 159, 159]], dtype=torch.float32).reshape(2, 2)
+        bbox = Utils.transform_pts(crop, tf.inverse()).reshape(-1, 4)
+        renderer = ModernglBatchRenderer()
+        self.addCleanup(renderer.release)
+        renderer.max_tiles_per_pass = 8
+        a = renderer.render(K, 480, 640, poses, mt, output_size=(160, 160), bbox2d=bbox, use_light=True, extra={})
+        renderer.max_tiles_per_pass = 1024
+        b = renderer.render(K, 480, 640, poses, mt, output_size=(160, 160), bbox2d=bbox, use_light=True, extra={})
+        fg_a, fg_b = a[1] > 0, b[1] > 0
+        self.assertGreater(fg_a.sum().item(), 10000)
+        self.assertTrue(torch.equal(fg_a, fg_b))
+        both = fg_a & fg_b
+        rgb_diff = (a[0] - b[0]).abs().amax(dim=-1)[both]
+        self.assertLess((rgb_diff > 2e-3).float().mean().item(), 1e-4)
+        depth_diff = (a[1] - b[1]).abs()[both]
+        self.assertLess((depth_diff > 1e-3).float().mean().item(), 1e-4)
+        self.assertLess(depth_diff.max().item(), 1e-2)
+
+    def test_failed_construction_returns_context_reference(self):
+        import moderngl_renderer as mr
+
+        keep = ModernglBatchRenderer()
+        self.addCleanup(keep.release)
+        key = (keep._backend, keep._owner_thread)
+        before = mr._CONTEXTS[key][1]
+        original = mr.FRAGMENT_SHADER
+        mr.FRAGMENT_SHADER = "not valid glsl"
+        try:
+            with self.assertRaises(Exception):
+                ModernglBatchRenderer()
+        finally:
+            mr.FRAGMENT_SHADER = original
+        self.assertEqual(mr._CONTEXTS[key][1], before)
+
+    def test_render_from_other_thread_raises(self):
+        import threading
+
+        pose = torch.tensor(cylinder_pose(), dtype=torch.float32)[None]
+        errors = []
+
+        def run():
+            try:
+                self.renderer.render(K, 480, 640, pose, self.mt, output_size=(480, 640))
+            except Exception as e:
+                errors.append(e)
+
+        t = threading.Thread(target=run)
+        t.start()
+        t.join()
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], RuntimeError)
+
 
 @unittest.skipUnless(EGL_OK and torch.cuda.is_available(), "needs EGL and CUDA")
 class NvdiffrastParityTest(unittest.TestCase):

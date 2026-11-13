@@ -1,5 +1,6 @@
 import logging
 import math
+import threading
 from dataclasses import dataclass
 
 import moderngl
@@ -82,26 +83,94 @@ class _MeshBuffers:
   ref: torch.Tensor
   vao: moderngl.VertexArray
   vbo_color: moderngl.Buffer
+  buffers: list
+
+
+# 同一线程内的所有 ModernglBatchRenderer 共用一个 EGL 上下文（按 (backend, 线程) 缓存，带引用计数，
+# 最后一个实例 release 时才销毁上下文）。注意：实例共享 GL 状态（当前 FBO、深度测试开关、当前 program 等），
+# 所以 render 里每次都必须重新 fbo.use()、重设 uniform，不能依赖上一次调用留下的状态。
+_CONTEXTS = {}
+
+
+def _acquire_context(backend: str):
+  key = (backend, threading.get_ident())
+  entry = _CONTEXTS.get(key)
+  if entry is None:
+    entry = [moderngl.create_standalone_context(backend=backend), 0]
+    _CONTEXTS[key] = entry
+  entry[1] += 1
+  return entry[0]
+
+
+def _release_context(backend: str, thread_id: int):
+  key = (backend, thread_id)
+  entry = _CONTEXTS[key]
+  entry[1] -= 1
+  if entry[1] == 0:
+    entry[0].release()
+    del _CONTEXTS[key]
 
 
 class ModernglBatchRenderer:
   def __init__(self, backend: str = "egl", max_tiles_per_pass: int = 1024):
     self.max_tiles_per_pass = max_tiles_per_pass
-    self.ctx = moderngl.create_standalone_context(backend=backend)
-    self.ctx.enable(moderngl.DEPTH_TEST)
-    self.gl_renderer = self.ctx.info["GL_RENDERER"]
-    logging.info(f"moderngl GL_RENDERER: {self.gl_renderer}")
-    if is_software_renderer(self.gl_renderer):
-      logging.warning(f"moderngl is using a software renderer ({self.gl_renderer}); rendering will be slow")
-    self.prog = self.ctx.program(vertex_shader=VERTEX_SHADER, fragment_shader=FRAGMENT_SHADER)
-    self.inst_bufs = [self.ctx.buffer(reserve=max_tiles_per_pass * 16) for _ in range(INSTANCE_SLOTS)]
+    self._backend = backend
+    self._owner_thread = threading.get_ident()
+    self._released = True  # 构造完成前视为已释放，避免半成品被误用
+    self.prog = None
+    self.inst_bufs = []
     self._meshes = {}
     self._fbo = None
+    self._fbo_attachments = []
     self._fbo_size = None
+    self.ctx = _acquire_context(backend)
+    self._released = False
+    try:
+      self.ctx.enable(moderngl.DEPTH_TEST)
+      self.gl_renderer = self.ctx.info["GL_RENDERER"]
+      logging.info(f"moderngl GL_RENDERER: {self.gl_renderer}")
+      if is_software_renderer(self.gl_renderer):
+        logging.warning(f"moderngl is using a software renderer ({self.gl_renderer}); rendering will be slow")
+      self.prog = self.ctx.program(vertex_shader=VERTEX_SHADER, fragment_shader=FRAGMENT_SHADER)
+      self.inst_bufs = [self.ctx.buffer(reserve=max_tiles_per_pass * 16) for _ in range(INSTANCE_SLOTS)]
+    except BaseException:
+      # 构造失败时调用方拿不到实例，必须在这里归还上下文引用并释放已创建的对象
+      self.release()
+      raise
+
+  def __enter__(self):
+    return self
+
+  def __exit__(self, exc_type, exc, tb):
+    self.release()
+
+  def release(self):
+    if self._released:
+      return
+    self._check_thread()
+    self._release_framebuffer()
+    for entry in self._meshes.values():
+      entry.vao.release()
+      for buf in entry.buffers:
+        buf.release()
+    self._meshes = {}
+    for buf in self.inst_bufs:
+      buf.release()
+    if self.prog is not None:
+      self.prog.release()
+    _release_context(self._backend, self._owner_thread)
+    self._released = True
+
+  def _check_thread(self):
+    if threading.get_ident() != self._owner_thread:
+      raise RuntimeError("ModernglBatchRenderer must be used on the thread that created it (EGL context is thread-bound)")
 
   def render(self, K, H, W, ob_in_cams: torch.Tensor, mesh_tensors: dict, output_size=None,
              bbox2d: torch.Tensor | None = None, use_light: bool = True, extra: dict | None = None
              ) -> tuple[torch.Tensor, torch.Tensor, None]:
+    if self._released:
+      raise RuntimeError("ModernglBatchRenderer has been released")
+    self._check_thread()
     if "tex" in mesh_tensors:
       raise NotImplementedError("ModernglBatchRenderer does not support textured meshes")
     device = ob_in_cams.device
@@ -179,13 +248,21 @@ class ModernglBatchRenderer:
 
   def _framebuffer(self, width, height):
     if self._fbo_size != (width, height):
-      if self._fbo is not None:
-        self._fbo.release()
+      self._release_framebuffer()
       color = [self.ctx.texture((width, height), 4, dtype="f4") for _ in range(2)]
       depth = self.ctx.depth_renderbuffer((width, height))
       self._fbo = self.ctx.framebuffer(color_attachments=color, depth_attachment=depth)
+      self._fbo_attachments = [*color, depth]
       self._fbo_size = (width, height)
     return self._fbo
+
+  def _release_framebuffer(self):
+    if self._fbo is not None:
+      self._fbo.release()
+      for obj in self._fbo_attachments:
+        obj.release()
+      self._fbo = None
+      self._fbo_attachments = []
 
   def _mesh_buffers(self, mesh_tensors):
     pos = mesh_tensors["pos"]
@@ -206,6 +283,6 @@ class ModernglBatchRenderer:
     ]
     content += [(buf, "4f/i", name) for buf, name in zip(self.inst_bufs, INSTANCE_NAMES)]
     vao = self.ctx.vertex_array(self.prog, content, index_buffer=ibo, index_element_size=4)
-    entry = _MeshBuffers(ref=pos, vao=vao, vbo_color=vbo_color)
+    entry = _MeshBuffers(ref=pos, vao=vao, vbo_color=vbo_color, buffers=[vbo_pos, vbo_normal, vbo_color, ibo])
     self._meshes[key] = entry
     return entry
