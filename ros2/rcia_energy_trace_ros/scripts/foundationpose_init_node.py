@@ -96,8 +96,12 @@ class FoundationPoseInitNode(Node):
         self.declare_parameter("detect_conf", 0.75)
         self.declare_parameter("register_conf", 0.75)
         self.declare_parameter("stable_frames", 3)
-        self.declare_parameter("est_refine_iter", 5)
+        self.declare_parameter("est_refine_iter", 3)
         self.declare_parameter("symmetry_mode", "z12")
+        self.declare_parameter("device", "cpu")
+        self.declare_parameter("render_backend", "moderngl")
+        self.declare_parameter("net_backend", "openvino")
+        self.declare_parameter("ov_device", "CPU")
         self.declare_parameter("canonicalize_yaw", True)
         self.declare_parameter("yaw_fallback_deg", 15.0)
         self.declare_parameter("sync_tolerance_ms", 5.0)
@@ -244,7 +248,7 @@ class FoundationPoseInitNode(Node):
         self.get_logger().info("Loading FoundationPose models for ROS2 initialization")
         self.mask_gen = MaskGenerator(
             yolo_path=self.get_parameter("yolo_model").value,
-            device="cuda",
+            device=self.get_parameter("device").value,
             center_frac=float(self.get_parameter("mask_center_frac").value),
             half_window_m=float(self.get_parameter("depth_window_half_m").value),
         )
@@ -276,6 +280,10 @@ class FoundationPoseInitNode(Node):
                 debug=int(self.get_parameter("debug").value),
                 debug_dir=self.get_parameter("debug_dir").value,
                 symmetry_mode=self.get_parameter("symmetry_mode").value,
+                device=self.get_parameter("device").value,
+                render_backend=self.get_parameter("render_backend").value,
+                net_backend=self.get_parameter("net_backend").value,
+                ov_device=self.get_parameter("ov_device").value,
             )
         )
         self.estimator_bundle = bundle

@@ -134,7 +134,7 @@ def run_offline(args, est, mesh, to_origin, bbox_vis, K):
     """离线模式：处理磁盘上保存的帧"""
     mask_gen = MaskGenerator(
         yolo_path=args.yolo_model,
-        device='cuda',
+        device=args.device,
         center_frac=args.mask_center_frac,
         half_window_m=args.depth_window_half_m,
     )
@@ -192,7 +192,7 @@ def run_live(args, est, mesh, to_origin, bbox_vis, K):
 
     mask_gen = MaskGenerator(
         yolo_path=args.yolo_model,
-        device='cuda',
+        device=args.device,
         center_frac=args.mask_center_frac,
         half_window_m=args.depth_window_half_m,
     )
@@ -389,8 +389,13 @@ if __name__ == '__main__':
                         help='包含 rgb/ 和 depth/ 子目录的数据路径（离线模式）')
 
     # 优化迭代次数
-    parser.add_argument('--est_refine_iter', type=int, default=5)
+    parser.add_argument('--est_refine_iter', type=int, default=3)
     parser.add_argument('--symmetry_mode', type=str, default='z12', choices=['none', 'z12'])
+    parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda'])
+    parser.add_argument('--render_backend', type=str, default='moderngl',
+                        choices=['nvdiffrast', 'moderngl'])
+    parser.add_argument('--net_backend', type=str, default='openvino', choices=['torch', 'openvino'])
+    parser.add_argument('--ov_device', type=str, default='CPU', choices=['CPU', 'GPU'])
     parser.add_argument('--no_canonicalize_yaw', action='store_true')
     parser.add_argument('--track_refine_iter', type=int, default=2)
 
@@ -410,11 +415,11 @@ if __name__ == '__main__':
 
     # --- 环境检查 ---
     import torch
-    if not torch.cuda.is_available():
-        raise RuntimeError('CUDA 不可用。FoundationPose 需要 GPU。')
-
-    # 清理GPU缓存
-    torch.cuda.empty_cache()
+    if args.device == 'cuda':
+        if not torch.cuda.is_available():
+            raise RuntimeError('CUDA 不可用。--device cuda 需要 GPU。')
+        # 清理GPU缓存
+        torch.cuda.empty_cache()
 
     # 设置内存分配策略
     import os
@@ -453,7 +458,9 @@ if __name__ == '__main__':
     # 加载 3D 模型并初始化 FoundationPose
     from scripts.foundationpose_factory import EstimatorConfig, build_estimator
     bundle = build_estimator(EstimatorConfig(mesh_file=args.mesh_file, debug=args.debug, debug_dir=debug_dir,
-                                             symmetry_mode=args.symmetry_mode))
+                                             symmetry_mode=args.symmetry_mode, device=args.device,
+                                             render_backend=args.render_backend,
+                                             net_backend=args.net_backend, ov_device=args.ov_device))
     est, mesh, to_origin, bbox_vis = bundle.estimator, bundle.mesh, bundle.to_origin, bundle.bbox_vis
     logging.info(f'Mesh: {len(mesh.vertices)} 顶点, {len(mesh.faces)} 面')
     logging.info('FoundationPose 初始化完成')

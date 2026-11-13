@@ -125,4 +125,6 @@ FORCE_CUDA=1 python -m pip install --no-build-isolation "git+https://github.com/
 
 bash "${PROJECT_ROOT}/foundation_pose/build_all_conda.sh"
 
+python "${PROJECT_ROOT}/scripts/export_foundationpose_openvino.py"
+
 python "${PROJECT_ROOT}/scripts/verify_foundationpose_ros_env.py"

@@ -33,6 +33,14 @@ def _foundationpose_cmd():
     timing_diagnostics = LaunchConfiguration("timing_diagnostics")
     timing_topic = LaunchConfiguration("timing_topic")
     show_foundationpose_windows = LaunchConfiguration("show_foundationpose_windows")
+    est_refine_iter = LaunchConfiguration("est_refine_iter")
+    device = LaunchConfiguration("device")
+    render_backend = LaunchConfiguration("render_backend")
+    net_backend = LaunchConfiguration("net_backend")
+    ov_device = LaunchConfiguration("ov_device")
+    symmetry_mode = LaunchConfiguration("symmetry_mode")
+    canonicalize_yaw = LaunchConfiguration("canonicalize_yaw")
+    yaw_fallback_deg = LaunchConfiguration("yaw_fallback_deg")
 
     return [
         "eval \"$(conda shell.bash hook)\" && "
@@ -89,6 +97,22 @@ def _foundationpose_cmd():
         timing_topic,
         " -p show_diagnostic_windows:=",
         show_foundationpose_windows,
+        " -p est_refine_iter:=",
+        est_refine_iter,
+        " -p device:=",
+        device,
+        " -p render_backend:=",
+        render_backend,
+        " -p net_backend:=",
+        net_backend,
+        " -p ov_device:=",
+        ov_device,
+        " -p symmetry_mode:=",
+        symmetry_mode,
+        " -p canonicalize_yaw:=",
+        canonicalize_yaw,
+        " -p yaw_fallback_deg:=",
+        yaw_fallback_deg,
     ]
 
 
@@ -119,6 +143,8 @@ def generate_launch_description():
     foundationpose_topic = LaunchConfiguration("foundationpose_topic")
     m3t_topic = LaunchConfiguration("m3t_topic")
     pipeline_topic = LaunchConfiguration("pipeline_topic")
+    canonicalize_yaw = LaunchConfiguration("canonicalize_yaw")
+    yaw_fallback_deg = LaunchConfiguration("yaw_fallback_deg")
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -232,6 +258,14 @@ def generate_launch_description():
         DeclareLaunchArgument("show_foundationpose_windows", default_value="false"),
         DeclareLaunchArgument("frame_history_size", default_value="300"),
         DeclareLaunchArgument("start_frame_tolerance_ms", default_value="80.0"),
+        DeclareLaunchArgument("est_refine_iter", default_value="3"),
+        DeclareLaunchArgument("device", default_value="cpu"),
+        DeclareLaunchArgument("render_backend", default_value="moderngl"),
+        DeclareLaunchArgument("net_backend", default_value="openvino"),
+        DeclareLaunchArgument("ov_device", default_value="CPU"),
+        DeclareLaunchArgument("symmetry_mode", default_value="z12"),
+        DeclareLaunchArgument("canonicalize_yaw", default_value="true"),
+        DeclareLaunchArgument("yaw_fallback_deg", default_value="15.0"),
         Node(
             package="rcia_energy_trace_ros",
             executable="realsense_rgbd_publisher_node",
@@ -472,6 +506,8 @@ def generate_launch_description():
                     LaunchConfiguration("preinit_min_black_white_support"),
                     value_type=float,
                 ),
+                "canonicalize_yaw": ParameterValue(canonicalize_yaw, value_type=bool),
+                "yaw_fallback_deg": ParameterValue(yaw_fallback_deg, value_type=float),
             }],
         ),
         Node(

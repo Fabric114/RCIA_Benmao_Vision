@@ -96,6 +96,31 @@ bash scripts/download_public_weights.sh
 - FoundationPose 官方 Google Drive 权重：https://drive.google.com/drive/folders/1DFezOAD0oD1BblsXVxqDsl8fj0qzB82i?usp=sharing
 - FoundationPose HuggingFace 镜像：https://huggingface.co/gpue/foundationpose-weights
 
+### 4. 部署到 Intel 小电脑（CPU + 核显）
+
+默认配置不使用 CUDA：`device=cpu`、`render_backend=moderngl`（EGL）、`net_backend=openvino`、`ov_device=CPU`，`est_refine_iter=3`。
+
+1. 让当前用户能访问 GPU 渲染设备，否则 EGL 会退化为软件渲染（`llvmpipe`），速度会很慢：
+   ```bash
+   sudo usermod -aG render $USER
+   ```
+   重新登录后生效。
+2. 导出 OpenVINO IR（安装脚本的最后一步已自动执行，只在需要重新导出时手动运行）：
+   ```bash
+   python scripts/export_foundationpose_openvino.py
+   ```
+3. 自检。输出中的 `GL_RENDERER` 为 `llvmpipe` 时脚本以退出码 1 失败：
+   ```bash
+   python scripts/verify_foundationpose_ros_env.py
+   ```
+4. YOLO 默认使用 `models/yolo/best_openvino_model`。换成新训练的模型时，先用 `yolo export model=<新模型>.pt format=openvino` 导出，再通过 `yolo_model:=<导出目录>` 指定。
+
+切回 CUDA 路径，用于和 GPU 结果对比：
+
+```bash
+ros2 launch rcia_energy_trace_ros full_energy_tracking.launch.py device:=cuda render_backend:=nvdiffrast net_backend:=torch
+```
+
 ## 项目结构
 
 ```text
