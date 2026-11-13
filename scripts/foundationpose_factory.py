@@ -14,6 +14,7 @@ from estimater import FoundationPose  # noqa: E402
 from learning.training.predict_pose_refine import PoseRefinePredictor  # noqa: E402
 from learning.training.predict_score import ScorePredictor  # noqa: E402
 from Utils import NVDIFFRAST_IMPORT_ERROR, dr, set_logging_format, set_seed  # noqa: E402
+from moderngl_renderer import ModernglBatchRenderer  # noqa: E402
 
 
 @dataclass
@@ -25,6 +26,7 @@ class EstimatorConfig:
     device: str = "cuda"
     net_backend: str = "torch"
     ov_device: str = "CPU"
+    render_backend: str = "nvdiffrast"
 
 # 约束能量单元绕z旋转角共12个，每30 1
 def z_symmetry_tfs(step_deg: float = 30.0) -> np.ndarray:
@@ -55,7 +57,11 @@ class EstimatorBundle:
 
 
 def build_estimator(cfg: EstimatorConfig) -> EstimatorBundle:
-    if cfg.device == "cuda" and dr is None:
+    if cfg.render_backend not in ("nvdiffrast", "moderngl"):
+        raise ValueError(f"unknown render_backend: {cfg.render_backend}")
+    if cfg.render_backend == "nvdiffrast" and cfg.device != "cuda":
+        raise ValueError("render_backend=nvdiffrast requires device=cuda")
+    if cfg.render_backend == "nvdiffrast" and dr is None:
         raise ImportError(
             "nvdiffrast 导入失败，请先 `source scripts/foundationpose_env.sh` 再运行"
         ) from NVDIFFRAST_IMPORT_ERROR
@@ -64,6 +70,12 @@ def build_estimator(cfg: EstimatorConfig) -> EstimatorBundle:
     if cfg.ov_device not in ("CPU", "GPU"):
         raise ValueError(f"unknown ov_device: {cfg.ov_device}")
     symmetry_tfs = symmetry_tfs_for_mode(cfg.symmetry_mode)
+    if cfg.render_backend == "moderngl":
+        glctx = ModernglBatchRenderer(backend="egl")
+    elif cfg.device == "cuda":
+        glctx = dr.RasterizeCudaContext()
+    else:
+        glctx = None
     set_logging_format()
     set_seed(0)
     mesh = trimesh.load(cfg.mesh_file, process=False)
@@ -78,7 +90,7 @@ def build_estimator(cfg: EstimatorConfig) -> EstimatorBundle:
         refiner=PoseRefinePredictor(device=cfg.device, net_backend=cfg.net_backend, ov_device=cfg.ov_device),
         debug_dir=cfg.debug_dir,
         debug=int(cfg.debug),
-        glctx=dr.RasterizeCudaContext() if cfg.device == "cuda" else None,
+        glctx=glctx,
         device=cfg.device,
     )
     return EstimatorBundle(

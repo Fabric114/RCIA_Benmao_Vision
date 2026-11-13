@@ -21,6 +21,7 @@ from learning.datasets.h5_dataset import *
 from learning.models.score_network import *
 from learning.datasets.pose_dataset import *
 from learning.ov_model import OVModel, score_ir_path
+from moderngl_renderer import ModernglBatchRenderer
 from Utils import *
 from datareader import *
 
@@ -84,9 +85,14 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
 
   if timing is not None:
     t_render = timing_clock()
+  if isinstance(glctx, ModernglBatchRenderer) and cfg['use_normal']:
+    raise NotImplementedError("moderngl render backend does not produce normal maps")
   for b in range(0,len(ob_in_cams),bs):
     extra = {}
-    rgb_r, depth_r, normal_r = nvdiffrast_render(K=K, H=H, W=W, ob_in_cams=poseAs[b:b+bs], context='cuda', get_normal=cfg['use_normal'], glctx=glctx, mesh_tensors=mesh_tensors, output_size=cfg['input_resize'], bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
+    if isinstance(glctx, ModernglBatchRenderer):
+      rgb_r, depth_r, normal_r = glctx.render(K=K, H=H, W=W, ob_in_cams=poseAs[b:b+bs], mesh_tensors=mesh_tensors, output_size=cfg['input_resize'], bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
+    else:
+      rgb_r, depth_r, normal_r = nvdiffrast_render(K=K, H=H, W=W, ob_in_cams=poseAs[b:b+bs], context='cuda', get_normal=cfg['use_normal'], glctx=glctx, mesh_tensors=mesh_tensors, output_size=cfg['input_resize'], bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
     rgb_rs.append(rgb_r)
     depth_rs.append(depth_r[...,None])
     xyz_map_rs.append(extra['xyz_map'])

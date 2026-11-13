@@ -23,7 +23,7 @@ OV_IR_OK = all(
 )
 
 
-def run_synthetic_register(cfg):
+def run_synthetic_register(cfg, iteration: int = 5):
     """返回 (中心误差 m, 长轴夹角 deg, last_timing_ms)。"""
     from scripts.foundationpose_factory import build_estimator
 
@@ -35,9 +35,13 @@ def run_synthetic_register(cfg):
     pose_gt = np.loadtxt(FIXTURE_DIR / "pose.txt")
 
     bundle = build_estimator(cfg)
-    pose = bundle.estimator.register(K=K, rgb=rgb, depth=depth, ob_mask=mask, iteration=5)
-    c, a = pose_errors(pose_gt, pose, bundle.model_center)
-    return c, a, dict(bundle.estimator.last_timing_ms)
+    try:
+        pose = bundle.estimator.register(K=K, rgb=rgb, depth=depth, ob_mask=mask, iteration=iteration)
+        c, a = pose_errors(pose_gt, pose, bundle.model_center)
+        return c, a, dict(bundle.estimator.last_timing_ms)
+    finally:
+        if hasattr(bundle.estimator.glctx, "release"):
+            bundle.estimator.glctx.release()
 
 
 @unittest.skipUnless(torch.cuda.is_available() and WEIGHTS_OK, "needs CUDA + weights")
@@ -68,6 +72,44 @@ class SyntheticRegisterTest(unittest.TestCase):
         c, a, timing = run_synthetic_register(cfg)
         print("openvino center_err_m", c, "axis_err_deg", a)
         print("openvino timing_ms", timing)
+        self.assertLessEqual(c, 0.005)
+        self.assertLessEqual(a, 5.0)
+
+
+@unittest.skipUnless(WEIGHTS_OK, "needs weights")
+class SyntheticRegisterCpuTest(unittest.TestCase):
+    def test_cpu_moderngl_torch(self):
+        from scripts.foundationpose_factory import EstimatorConfig
+
+        cfg = EstimatorConfig(mesh_file=MESH, device="cpu", render_backend="moderngl",
+                              net_backend="torch", symmetry_mode="z12")
+        c, a, timing = run_synthetic_register(cfg)
+        print("cpu moderngl torch center_err_m", c, "axis_err_deg", a)
+        print("timing_ms", timing)
+        self.assertLessEqual(c, 0.005)
+        self.assertLessEqual(a, 5.0)
+
+    @unittest.skipUnless(OV_IR_OK, "needs exported OpenVINO FP32 IR")
+    def test_cpu_moderngl_openvino(self):
+        from scripts.foundationpose_factory import EstimatorConfig
+
+        cfg = EstimatorConfig(mesh_file=MESH, device="cpu", render_backend="moderngl",
+                              net_backend="openvino", symmetry_mode="z12")
+        c, a, timing = run_synthetic_register(cfg)
+        print("cpu moderngl openvino center_err_m", c, "axis_err_deg", a)
+        print("timing_ms", timing)
+        self.assertLessEqual(c, 0.005)
+        self.assertLessEqual(a, 5.0)
+
+    @unittest.skipUnless(OV_IR_OK, "needs exported OpenVINO FP32 IR")
+    def test_cpu_moderngl_openvino_iter3(self):
+        from scripts.foundationpose_factory import EstimatorConfig
+
+        cfg = EstimatorConfig(mesh_file=MESH, device="cpu", render_backend="moderngl",
+                              net_backend="openvino", symmetry_mode="z12")
+        c, a, timing = run_synthetic_register(cfg, iteration=3)
+        print("cpu moderngl openvino iter3 center_err_m", c, "axis_err_deg", a)
+        print("timing_ms", timing)
         self.assertLessEqual(c, 0.005)
         self.assertLessEqual(a, 5.0)
 
