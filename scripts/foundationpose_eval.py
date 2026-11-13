@@ -178,6 +178,8 @@ def build_parser():
     p.add_argument("--est_refine_iter", type=int, default=5)
     p.add_argument("--symmetry_mode", choices=["none", "z12"], default="none")
     p.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+    p.add_argument("--net_backend", choices=["torch", "openvino"], default="torch")
+    p.add_argument("--ov_device", choices=["CPU", "GPU"], default="CPU")
     p.add_argument("--mesh_file", default=str(PROJECT_ROOT / "models/object/Str3D.obj"))
     p.add_argument("--debug", type=int, default=0)
     p.add_argument("--debug_dir", default=str(PROJECT_ROOT / "runtime/foundationpose_debug"))

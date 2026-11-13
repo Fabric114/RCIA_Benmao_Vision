@@ -20,8 +20,10 @@ except (ImportError, OSError):
 from scipy.interpolate import griddata
 try:
   import nvdiffrast.torch as dr
-except (ImportError, OSError):
+  NVDIFFRAST_IMPORT_ERROR = None
+except (ImportError, OSError) as e:
   dr = None
+  NVDIFFRAST_IMPORT_ERROR = e
 import torch.nn.functional as F
 import torchvision
 import torch.nn as nn

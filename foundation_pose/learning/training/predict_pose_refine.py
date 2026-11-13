@@ -17,6 +17,7 @@ import torch
 from omegaconf import OmegaConf
 from learning.models.refine_network import RefineNet
 from learning.datasets.h5_dataset import *
+from learning.ov_model import OVModel, refine_ir_path
 from Utils import *
 from datareader import *
 
@@ -105,10 +106,13 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
 
 
 class PoseRefinePredictor:
-  def __init__(self, device='cuda'):
+  def __init__(self, device='cuda', net_backend='torch', ov_device='CPU'):
     logging.info("welcome")
+    if net_backend not in ('torch', 'openvino'):
+      raise ValueError(f"unknown net_backend: {net_backend}")
     self.amp = True
     self.device = device
+    self.net_backend = net_backend
     self.run_name = "2023-10-28-18-33-37"
     model_name = 'model_best.pth'
     code_dir = os.path.dirname(os.path.realpath(__file__))
@@ -147,15 +151,18 @@ class PoseRefinePredictor:
     logging.info(f"self.cfg: \n {OmegaConf.to_yaml(self.cfg)}")
 
     self.dataset = PoseRefinePairH5Dataset(cfg=self.cfg, h5_file='', mode='test', device=self.device)
-    self.model = RefineNet(cfg=self.cfg, c_in=self.cfg['c_in']).to(self.device)
+    if self.net_backend == 'openvino':
+      self.model = OVModel(refine_ir_path(f'{code_dir}/../../weights', 'fp32'), ('trans', 'rot'), device=ov_device)
+    else:
+      self.model = RefineNet(cfg=self.cfg, c_in=self.cfg['c_in']).to(self.device)
 
-    logging.info(f"Using pretrained model from {ckpt_dir}")
-    ckpt = torch.load(ckpt_dir, map_location=self.device)
-    if 'model' in ckpt:
-      ckpt = ckpt['model']
-    self.model.load_state_dict(ckpt)
+      logging.info(f"Using pretrained model from {ckpt_dir}")
+      ckpt = torch.load(ckpt_dir, map_location=self.device)
+      if 'model' in ckpt:
+        ckpt = ckpt['model']
+      self.model.load_state_dict(ckpt)
 
-    self.model.to(self.device).eval()
+      self.model.to(self.device).eval()
     logging.info("init done")
     self.last_trans_update = None
     self.last_rot_update = None
@@ -205,7 +212,7 @@ class PoseRefinePredictor:
         B = torch.cat([pose_data.rgbBs[b:b+bs].to(self.device), pose_data.xyz_mapBs[b:b+bs].to(self.device)], dim=1).float()
         logging.info("forward start")
         t_net = timing_clock()
-        with torch.cuda.amp.autocast(enabled=self.amp and self.device == 'cuda'):
+        with torch.cuda.amp.autocast(enabled=self.amp and self.device == 'cuda' and self.net_backend == 'torch'):
           output = self.model(A,B)
         for k in output:
           output[k] = output[k].float()

@@ -77,6 +77,7 @@ python -m pip install \
   PyYAML==6.0.1 \
   kornia==0.7.2 \
   "moderngl>=5.10" \
+  openvino==2024.6.0 \
   transformations==2024.6.1 \
   pandas \
   matplotlib \

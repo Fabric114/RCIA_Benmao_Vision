@@ -17,6 +17,10 @@ WEIGHTS_OK = all(
     (PROJECT_ROOT / "foundation_pose/weights" / run / "model_best.pth").exists()
     for run in ("2023-10-28-18-33-37", "2024-01-11-20-02-45")
 )
+OV_IR_OK = all(
+    (PROJECT_ROOT / "foundation_pose/weights" / run / "openvino" / name).exists()
+    for run, name in (("2023-10-28-18-33-37", "refine_fp32.xml"), ("2024-01-11-20-02-45", "score_fp32.xml"))
+)
 
 
 def run_synthetic_register(cfg):
@@ -53,6 +57,17 @@ class SyntheticRegisterTest(unittest.TestCase):
         c, a, timing = run_synthetic_register(EstimatorConfig(mesh_file=MESH, symmetry_mode="z12"))
         print("z12 center_err_m", c, "axis_err_deg", a)
         print("z12 timing_ms", timing)
+        self.assertLessEqual(c, 0.005)
+        self.assertLessEqual(a, 5.0)
+
+    @unittest.skipUnless(OV_IR_OK, "needs exported OpenVINO FP32 IR")
+    def test_openvino_nets_cuda_render(self):
+        from scripts.foundationpose_factory import EstimatorConfig
+
+        cfg = EstimatorConfig(mesh_file=MESH, symmetry_mode="z12", net_backend="openvino")
+        c, a, timing = run_synthetic_register(cfg)
+        print("openvino center_err_m", c, "axis_err_deg", a)
+        print("openvino timing_ms", timing)
         self.assertLessEqual(c, 0.005)
         self.assertLessEqual(a, 5.0)
 

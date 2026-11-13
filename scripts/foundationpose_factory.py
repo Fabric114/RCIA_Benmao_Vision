@@ -13,7 +13,7 @@ if str(FOUNDATIONPOSE_DIR) not in sys.path:
 from estimater import FoundationPose  # noqa: E402
 from learning.training.predict_pose_refine import PoseRefinePredictor  # noqa: E402
 from learning.training.predict_score import ScorePredictor  # noqa: E402
-from Utils import dr, set_logging_format, set_seed  # noqa: E402
+from Utils import NVDIFFRAST_IMPORT_ERROR, dr, set_logging_format, set_seed  # noqa: E402
 
 
 @dataclass
@@ -23,6 +23,8 @@ class EstimatorConfig:
     debug_dir: str = "runtime/foundationpose_debug"
     symmetry_mode: str = "none"
     device: str = "cuda"
+    net_backend: str = "torch"
+    ov_device: str = "CPU"
 
 # 约束能量单元绕z旋转角共12个，每30 1
 def z_symmetry_tfs(step_deg: float = 30.0) -> np.ndarray:
@@ -53,6 +55,14 @@ class EstimatorBundle:
 
 
 def build_estimator(cfg: EstimatorConfig) -> EstimatorBundle:
+    if cfg.device == "cuda" and dr is None:
+        raise ImportError(
+            "nvdiffrast 导入失败，请先 `source scripts/foundationpose_env.sh` 再运行"
+        ) from NVDIFFRAST_IMPORT_ERROR
+    if cfg.net_backend not in ("torch", "openvino"):
+        raise ValueError(f"unknown net_backend: {cfg.net_backend}")
+    if cfg.ov_device not in ("CPU", "GPU"):
+        raise ValueError(f"unknown ov_device: {cfg.ov_device}")
     symmetry_tfs = symmetry_tfs_for_mode(cfg.symmetry_mode)
     set_logging_format()
     set_seed(0)
@@ -64,8 +74,8 @@ def build_estimator(cfg: EstimatorConfig) -> EstimatorBundle:
         model_normals=mesh.vertex_normals.copy(),
         symmetry_tfs=symmetry_tfs,
         mesh=mesh,
-        scorer=ScorePredictor(device=cfg.device),
-        refiner=PoseRefinePredictor(device=cfg.device),
+        scorer=ScorePredictor(device=cfg.device, net_backend=cfg.net_backend, ov_device=cfg.ov_device),
+        refiner=PoseRefinePredictor(device=cfg.device, net_backend=cfg.net_backend, ov_device=cfg.ov_device),
         debug_dir=cfg.debug_dir,
         debug=int(cfg.debug),
         glctx=dr.RasterizeCudaContext() if cfg.device == "cuda" else None,

@@ -20,3 +20,13 @@ You can also run:
 ```bash
 bash scripts/download_public_weights.sh
 ```
+
+## OpenVINO IR 导出
+
+在仓库根目录、激活 `foundationpose_ros` 环境后执行：
+
+```bash
+python scripts/export_foundationpose_openvino.py
+```
+
+会生成 `2023-10-28-18-33-37/openvino/refine_fp32.xml` 和 `2024-01-11-20-02-45/openvino/score_fp32.xml`（FP32，未压缩为 FP16）。权重更新后需重新导出。

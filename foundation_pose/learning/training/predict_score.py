@@ -20,6 +20,7 @@ sys.path.append(f'{code_dir}/../../../')
 from learning.datasets.h5_dataset import *
 from learning.models.score_network import *
 from learning.datasets.pose_dataset import *
+from learning.ov_model import OVModel, score_ir_path
 from Utils import *
 from datareader import *
 
@@ -130,9 +131,12 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
 
 
 class ScorePredictor:
-  def __init__(self, amp=True, device='cuda'):
+  def __init__(self, amp=True, device='cuda', net_backend='torch', ov_device='CPU'):
+    if net_backend not in ('torch', 'openvino'):
+      raise ValueError(f"unknown net_backend: {net_backend}")
     self.amp = amp
     self.device = device
+    self.net_backend = net_backend
     self.run_name = "2024-01-11-20-02-45"
 
     model_name = 'model_best.pth'
@@ -161,15 +165,18 @@ class ScorePredictor:
     logging.info(f"self.cfg: \n {OmegaConf.to_yaml(self.cfg)}")
 
     self.dataset = ScoreMultiPairH5Dataset(cfg=self.cfg, mode='test', h5_file=None, max_num_key=1, device=self.device)
-    self.model = ScoreNetMultiPair(cfg=self.cfg, c_in=self.cfg['c_in']).to(self.device)
+    if self.net_backend == 'openvino':
+      self.model = OVModel(score_ir_path(f'{code_dir}/../../weights', 'fp32'), ('score_logit',), device=ov_device)
+    else:
+      self.model = ScoreNetMultiPair(cfg=self.cfg, c_in=self.cfg['c_in']).to(self.device)
 
-    logging.info(f"Using pretrained model from {ckpt_dir}")
-    ckpt = torch.load(ckpt_dir, map_location=self.device)
-    if 'model' in ckpt:
-      ckpt = ckpt['model']
-    self.model.load_state_dict(ckpt)
+      logging.info(f"Using pretrained model from {ckpt_dir}")
+      ckpt = torch.load(ckpt_dir, map_location=self.device)
+      if 'model' in ckpt:
+        ckpt = ckpt['model']
+      self.model.load_state_dict(ckpt)
 
-    self.model.to(self.device).eval()
+      self.model.to(self.device).eval()
     logging.info("init done")
     self.last_timing_ms = {'render': 0.0, 'warp': 0.0, 'net': 0.0}
 
@@ -210,7 +217,7 @@ class ScorePredictor:
           A = torch.cat([A, pose_data.normalAs.to(self.device).float()], dim=1)
           B = torch.cat([B, pose_data.normalBs.to(self.device).float()], dim=1)
         t_net = timing_clock()
-        with torch.cuda.amp.autocast(enabled=self.amp and self.device == 'cuda'):
+        with torch.cuda.amp.autocast(enabled=self.amp and self.device == 'cuda' and self.net_backend == 'torch'):
           output = self.model(A, B, L=len(A))
         scores_cur = output["score_logit"].float().reshape(-1)
         timing['net'] += (timing_clock() - t_net) * 1000.0
