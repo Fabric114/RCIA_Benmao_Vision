@@ -40,6 +40,17 @@ source /opt/ros/humble/setup.bash
 set -u
 source "${PROJECT_ROOT}/scripts/foundationpose_env.sh"
 
+if ! command -v cmake >/dev/null 2>&1; then
+  echo "cmake was not found. Install the system packages in tip/tip.md step 1 first." >&2
+  exit 1
+fi
+for pkg in libboost-system-dev libboost-program-options-dev libeigen3-dev; do
+  if ! dpkg -s "${pkg}" >/dev/null 2>&1; then
+    echo "${pkg} is not installed. Install the system packages in tip/tip.md step 1 first." >&2
+    exit 1
+  fi
+done
+
 python -m pip install --upgrade pip setuptools wheel
 
 python -m pip install \
@@ -65,6 +76,7 @@ rm -rf \
 python -m pip install \
   numpy==1.26.4 \
   pybind11==2.12.0 \
+  opencv-python==4.9.0.80 \
   opencv-contrib-python==4.9.0.80 \
   scipy==1.11.4 \
   scikit-learn==1.4.1.post1 \
@@ -108,8 +120,7 @@ python -m pip install \
   tifffile \
   huggingface_hub \
   safetensors \
-  tabulate \
-  nvidia-cuda-nvcc-cu12==12.1.105
+  tabulate
 
 CV2_DIR="${SITE_PACKAGES}/cv2"
 if [[ -d "${CV2_DIR}/python-3.10" ]]; then
@@ -117,11 +128,11 @@ if [[ -d "${CV2_DIR}/python-3.10" ]]; then
   mv "${CV2_DIR}/python-3.10" "${CV2_DIR}/python-3.10.conda-disabled"
 fi
 if [[ -f "${CV2_DIR}/config-3.10.py" ]]; then
-  cp "${CV2_DIR}/config-3.10.py" "${CV2_DIR}/config-3.10.py.conda-disabled"
+  if [[ ! -f "${CV2_DIR}/config-3.10.py.conda-disabled" ]]; then
+    cp "${CV2_DIR}/config-3.10.py" "${CV2_DIR}/config-3.10.py.conda-disabled"
+  fi
   printf '%s\n' 'PYTHON_EXTENSIONS_PATHS = [LOADER_DIR] + PYTHON_EXTENSIONS_PATHS' > "${CV2_DIR}/config-3.10.py"
 fi
-
-FORCE_CUDA=1 python -m pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@f5f6b78e70e0a1b70f3be9a09b5b001e9b3a7a03"
 
 bash "${PROJECT_ROOT}/foundation_pose/build_all_conda.sh"
 

@@ -15,13 +15,4 @@ rm -rf build && mkdir -p build && cd build && \
 cmake .. -Dpybind11_DIR="${PYBIND11_DIR}" -DPYTHON_EXECUTABLE="${PYTHON_EXECUTABLE}" && \
 make -j$(nproc)
 
-# Install nvdiffrast
-cd ${PROJ_ROOT}/nvdiffrast && \
-"${PYTHON_EXECUTABLE}" -m pip install --no-build-isolation -e .
-
-# Install mycuda
-cd ${PROJ_ROOT}/bundlesdf/mycuda && \
-rm -rf build *egg* *.so && \
-"${PYTHON_EXECUTABLE}" -m pip install --no-build-isolation -e .
-
 cd ${PROJ_ROOT}

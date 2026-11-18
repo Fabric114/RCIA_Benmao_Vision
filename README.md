@@ -115,7 +115,7 @@ bash scripts/download_public_weights.sh
    ```
 4. YOLO 默认使用 `models/yolo/best_openvino_model`。换成新训练的模型时，先用 `yolo export model=<新模型>.pt format=openvino` 导出，再通过 `yolo_model:=<导出目录>` 指定。
 
-切回 CUDA 路径，用于和 GPU 结果对比：
+切回 CUDA 路径，用于和 GPU 结果对比。这条路径需要 nvdiffrast，安装脚本已不再包含它，需要手动安装：
 
 ```bash
 ros2 launch rcia_energy_trace_ros full_energy_tracking.launch.py device:=cuda render_backend:=nvdiffrast net_backend:=torch
