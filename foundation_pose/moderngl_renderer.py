@@ -123,6 +123,7 @@ class ModernglBatchRenderer:
     self._fbo = None
     self._fbo_attachments = []
     self._fbo_size = None
+    self._raw_bufs = []
     self.ctx = _acquire_context(backend)
     self._released = False
     try:
@@ -206,8 +207,9 @@ class ModernglBatchRenderer:
       rgb, xyz = self._render_pass(mesh, mtx[sl], poses[sl], h, w, use_light)
       rgb_out.append(rgb)
       xyz_out.append(xyz)
-    rgb = torch.cat(rgb_out, dim=0).to(device)
-    xyz = torch.cat(xyz_out, dim=0).to(device)
+    # 只有一块时直接复用，避免 torch.cat 对单个张量再做一次整批复制
+    rgb = (rgb_out[0] if len(rgb_out) == 1 else torch.cat(rgb_out, dim=0)).to(device)
+    xyz = (xyz_out[0] if len(xyz_out) == 1 else torch.cat(xyz_out, dim=0)).to(device)
     depth = xyz[..., 2]
     rgb = rgb * (depth > 0)[..., None]
     if extra is not None:
@@ -236,15 +238,21 @@ class ModernglBatchRenderer:
     self.prog["u_use_light"].value = 1.0 if use_light else 0.0
     mesh.vao.render(moderngl.TRIANGLES, instances=n)
 
-    rgb_raw = np.frombuffer(fbo.read(attachment=0, components=4, dtype="f4"), dtype=np.float32)
-    xyz_raw = np.frombuffer(fbo.read(attachment=1, components=4, dtype="f4"), dtype=np.float32)
-    rgb = self._untile(rgb_raw, rows, cols, h, w, n)
-    xyz = self._untile(xyz_raw, rows, cols, h, w, n)[..., :3]
-    return torch.from_numpy(rgb[..., :3].copy()), torch.from_numpy(xyz.copy())
+    # 读回到预分配的缓冲中，不每次新建 bytes
+    fbo.read_into(self._raw_bufs[0], attachment=0, components=4, dtype="f4")
+    fbo.read_into(self._raw_bufs[1], attachment=1, components=4, dtype="f4")
+    rgb = self._untile(self._raw_bufs[0], rows, cols, h, w, n, 3)
+    xyz = self._untile(self._raw_bufs[1], rows, cols, h, w, n, 3)
+    return torch.from_numpy(rgb), torch.from_numpy(xyz)
 
-  def _untile(self, raw, rows, cols, h, w, n):
-    grid = raw.reshape(rows, h, cols, w, 4).transpose(0, 2, 1, 3, 4).reshape(rows * cols, h, w, 4)
-    return np.ascontiguousarray(grid[:n, ::-1])
+  def _untile(self, raw, rows, cols, h, w, n, channels):
+    # raw 是 OpenGL 原始读回的 (rows*h, cols*w, 4) 数据，原点在左下角。
+    # 拆图集、上下翻转、取前 channels 个通道都用视图完成，最后只做一次连续化写入。
+    # 输出是新分配的数组，与 raw 缓冲不共享内存，所以 raw 可以被下一次渲染覆盖。
+    tiles = raw.reshape(rows, h, cols, w, 4).transpose(0, 2, 1, 3, 4)
+    out = np.empty((rows * cols, h, w, channels), dtype=np.float32)
+    np.copyto(out.reshape(rows, cols, h, w, channels), tiles[:, :, ::-1, :, :channels])
+    return out[:n]
 
   def _framebuffer(self, width, height):
     if self._fbo_size != (width, height):
@@ -254,6 +262,8 @@ class ModernglBatchRenderer:
       self._fbo = self.ctx.framebuffer(color_attachments=color, depth_attachment=depth)
       self._fbo_attachments = [*color, depth]
       self._fbo_size = (width, height)
+      # 与 FBO 同尺寸的 RGBA float32 读回缓冲，每次渲染复用；_untile 会把结果复制出去，所以不会被外部持有
+      self._raw_bufs = [np.empty((height, width, 4), dtype=np.float32) for _ in range(2)]
     return self._fbo
 
   def _release_framebuffer(self):
@@ -263,6 +273,7 @@ class ModernglBatchRenderer:
         obj.release()
       self._fbo = None
       self._fbo_attachments = []
+      self._raw_bufs = []
 
   def _mesh_buffers(self, mesh_tensors):
     pos = mesh_tensors["pos"]

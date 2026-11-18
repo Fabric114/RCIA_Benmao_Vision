@@ -66,12 +66,13 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
     depth_rs.append(depth_r[...,None])
     normal_rs.append(normal_r)
     xyz_map_rs.append(extra['xyz_map'])
-  rgb_rs = torch.cat(rgb_rs, dim=0).permute(0,3,1,2) * 255
-  depth_rs = torch.cat(depth_rs, dim=0).permute(0,3,1,2)  #(B,1,H,W)
-  xyz_map_rs = torch.cat(xyz_map_rs, dim=0).permute(0,3,1,2)  #(B,3,H,W)
-  Ks = torch.as_tensor(K, device=device, dtype=torch.float).reshape(1,3,3)
+  # 只有一块时直接复用，避免 torch.cat 对单个张量再做一次整批复制
+  rgb_rs = (rgb_rs[0] if len(rgb_rs) == 1 else torch.cat(rgb_rs, dim=0)).permute(0,3,1,2) * 255
+  depth_rs = (depth_rs[0] if len(depth_rs) == 1 else torch.cat(depth_rs, dim=0)).permute(0,3,1,2)  #(B,1,H,W)
+  xyz_map_rs = (xyz_map_rs[0] if len(xyz_map_rs) == 1 else torch.cat(xyz_map_rs, dim=0)).permute(0,3,1,2)  #(B,3,H,W)
+  Ks =torch.as_tensor(K, device=device, dtype=torch.float).reshape(1,3,3)
   if cfg['use_normal']:
-    normal_rs = torch.cat(normal_rs, dim=0).permute(0,3,1,2)  #(B,3,H,W)
+    normal_rs = (normal_rs[0] if len(normal_rs) == 1 else torch.cat(normal_rs, dim=0)).permute(0,3,1,2)  #(B,3,H,W)
 
   logging.info("render done")
   if timing is not None:
