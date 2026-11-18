@@ -62,7 +62,7 @@ def vis_batch_data_scores(pose_data, ids, scores, pad_margin=5):
 
 
 @torch.no_grad()
-def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_ratio, normal_map=None, mesh_diameter=None, glctx=None, mesh_tensors=None, dataset:TripletH5Dataset=None, cfg=None, timing=None, device='cuda'):
+def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_ratio, normal_map=None, mesh_diameter=None, glctx=None, mesh_tensors=None, dataset:TripletH5Dataset=None, cfg=None, timing=None, rgb_is_normalized=False, device='cuda'):
   logging.info("Welcome make_crop_data_batch")
   t_start = timing_clock() if timing is not None else None
   H,W = depth.shape[:2]
@@ -98,14 +98,18 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
     xyz_map_rs.append(extra['xyz_map'])
 
   # 只有一块时直接复用，避免 torch.cat 对单个张量再做一次整批复制
-  rgb_rs = (rgb_rs[0] if len(rgb_rs) == 1 else torch.cat(rgb_rs, dim=0)).permute(0,3,1,2) * 255
+  # 渲染 rgb 已是 [0,1]，不再乘 255，dataset.transform_batch 也不再除 255
+  rgb_rs = (rgb_rs[0] if len(rgb_rs) == 1 else torch.cat(rgb_rs, dim=0)).permute(0,3,1,2)
   depth_rs = (depth_rs[0] if len(depth_rs) == 1 else torch.cat(depth_rs, dim=0)).permute(0,3,1,2)
   xyz_map_rs = (xyz_map_rs[0] if len(xyz_map_rs) == 1 else torch.cat(xyz_map_rs, dim=0)).permute(0,3,1,2)  #(B,3,H,W)
   logging.info("render done")
   if timing is not None:
     t_warp = timing_clock()
 
-  rgbBs = kornia.geometry.transform.warp_perspective(torch.as_tensor(rgb, dtype=torch.float, device=device).permute(2,0,1)[None].expand(B,-1,-1,-1), tf_to_crops, dsize=render_size, mode='bilinear', align_corners=False)
+  rgb_c = torch.as_tensor(rgb, dtype=torch.float, device=device)
+  if not rgb_is_normalized:
+    rgb_c = rgb_c / 255.0  # 对单张相机图只除一次，之后 warp 与 [0,1] 渲染图一致
+  rgbBs = kornia.geometry.transform.warp_perspective(rgb_c.permute(2,0,1)[None].expand(B,-1,-1,-1), tf_to_crops, dsize=render_size, mode='bilinear', align_corners=False)
   depthBs = kornia.geometry.transform.warp_perspective(torch.as_tensor(depth, dtype=torch.float, device=device)[None,None].expand(B,-1,-1,-1), tf_to_crops, dsize=render_size, mode='nearest', align_corners=False)
   if rgb_rs.shape[-2:]!=cfg['input_resize']:
     rgbAs = kornia.geometry.transform.warp_perspective(rgb_rs, tf_to_crops, dsize=render_size, mode='bilinear', align_corners=False)
@@ -126,7 +130,7 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
   mesh_diameters = torch.ones((len(rgbAs)), dtype=torch.float, device=device)*mesh_diameter
 
   pose_data = BatchPoseData(rgbAs=rgbAs, rgbBs=rgbBs, depthAs=depthAs, depthBs=depthBs, normalAs=normalAs, normalBs=normalBs, poseA=poseAs, xyz_mapAs=xyz_mapAs, tf_to_crops=tf_to_crops, Ks=Ks, mesh_diameters=mesh_diameters)
-  pose_data = dataset.transform_batch(pose_data, H_ori=H, W_ori=W, bound=1)
+  pose_data = dataset.transform_batch(pose_data, H_ori=H, W_ori=W, bound=1, rgb_is_normalized=True)
 
   logging.info("pose batch data done")
   if timing is not None:
@@ -207,10 +211,10 @@ class ScorePredictor:
     if mesh_tensors is None:
       mesh_tensors = make_mesh_tensors(mesh, device=self.device)
 
-    rgb = torch.as_tensor(rgb, device=self.device, dtype=torch.float)
+    rgb = torch.as_tensor(rgb, device=self.device, dtype=torch.float) * (1.0 / 255.0)  # 入口只归一化一次
     depth = torch.as_tensor(depth, device=self.device, dtype=torch.float)
 
-    pose_data = make_crop_data_batch(self.cfg.input_resize, ob_in_cams, mesh, rgb, depth, K, crop_ratio=self.cfg['crop_ratio'], glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, cfg=self.cfg, mesh_diameter=mesh_diameter, timing=timing, device=self.device)
+    pose_data = make_crop_data_batch(self.cfg.input_resize, ob_in_cams, mesh, rgb, depth, K, crop_ratio=self.cfg['crop_ratio'], glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, cfg=self.cfg, mesh_diameter=mesh_diameter, timing=timing, rgb_is_normalized=True, device=self.device)
 
     def find_best_among_pairs(pose_data:BatchPoseData):
       logging.info(f'pose_data.rgbAs.shape[0]: {pose_data.rgbAs.shape[0]}')

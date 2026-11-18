@@ -116,13 +116,18 @@ class PairH5Dataset(torch.utils.data.Dataset):
 
 
 
-  def transform_batch(self, batch:BatchPoseData, H_ori, W_ori, bound=1):
+  def transform_batch(self, batch:BatchPoseData, H_ori, W_ori, bound=1, rgb_is_normalized: bool = False):
     '''Transform the batch before feeding to the network
     !NOTE the H_ori, W_ori could be different at test time from the training data, and needs to be set
     '''
     bs = len(batch.rgbAs)
-    batch.rgbAs = batch.rgbAs.to(self.device).float()/255.0
-    batch.rgbBs = batch.rgbBs.to(self.device).float()/255.0
+    if rgb_is_normalized:
+      # 已是 [0,1] float32 时 .to() 为零拷贝 no-op
+      batch.rgbAs = batch.rgbAs.to(device=self.device, dtype=torch.float32)
+      batch.rgbBs = batch.rgbBs.to(device=self.device, dtype=torch.float32)
+    else:
+      batch.rgbAs = batch.rgbAs.to(self.device).float()/255.0
+      batch.rgbBs = batch.rgbBs.to(self.device).float()/255.0
 
     batch = self.transform_depth_to_xyzmap(batch, H_ori, W_ori, bound=bound)
     return batch
@@ -171,10 +176,15 @@ class TripletH5Dataset(PairH5Dataset):
     return batch
 
 
-  def transform_batch(self, batch:BatchPoseData, H_ori, W_ori, bound=1):
+  def transform_batch(self, batch:BatchPoseData, H_ori, W_ori, bound=1, rgb_is_normalized: bool = False):
     bs = len(batch.rgbAs)
-    batch.rgbAs = batch.rgbAs.to(self.device).float()/255.0
-    batch.rgbBs = batch.rgbBs.to(self.device).float()/255.0
+    if rgb_is_normalized:
+      # 已是 [0,1] float32 时 .to() 为零拷贝 no-op
+      batch.rgbAs = batch.rgbAs.to(device=self.device, dtype=torch.float32)
+      batch.rgbBs = batch.rgbBs.to(device=self.device, dtype=torch.float32)
+    else:
+      batch.rgbAs = batch.rgbAs.to(self.device).float()/255.0
+      batch.rgbBs = batch.rgbBs.to(self.device).float()/255.0
 
     batch = self.transform_depth_to_xyzmap(batch, H_ori, W_ori, bound=bound)
     return batch
@@ -208,13 +218,18 @@ class PoseRefinePairH5Dataset(PairH5Dataset):
           break
 
 
-  def transform_batch(self, batch:BatchPoseData, H_ori, W_ori, bound=1):
+  def transform_batch(self, batch:BatchPoseData, H_ori, W_ori, bound=1, rgb_is_normalized: bool = False):
     '''Transform the batch before feeding to the network
     !NOTE the H_ori, W_ori could be different at test time from the training data, and needs to be set
     '''
     bs = len(batch.rgbAs)
-    batch.rgbAs = batch.rgbAs.to(self.device).float()/255.0
-    batch.rgbBs = batch.rgbBs.to(self.device).float()/255.0
+    if rgb_is_normalized:
+      # 已是 [0,1] float32 时 .to() 为零拷贝 no-op
+      batch.rgbAs = batch.rgbAs.to(device=self.device, dtype=torch.float32)
+      batch.rgbBs = batch.rgbBs.to(device=self.device, dtype=torch.float32)
+    else:
+      batch.rgbAs = batch.rgbAs.to(self.device).float()/255.0
+      batch.rgbBs = batch.rgbBs.to(self.device).float()/255.0
 
     batch = self.transform_depth_to_xyzmap(batch, H_ori, W_ori, bound=bound)
     return batch

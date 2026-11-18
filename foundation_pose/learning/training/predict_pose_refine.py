@@ -30,7 +30,7 @@ def timing_clock():
 
 
 @torch.inference_mode()
-def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_ratio, xyz_map, normal_map=None, mesh_diameter=None, cfg=None, glctx=None, mesh_tensors=None, dataset:PoseRefinePairH5Dataset=None, timing=None, device='cuda'):
+def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_ratio, xyz_map, normal_map=None, mesh_diameter=None, cfg=None, glctx=None, mesh_tensors=None, dataset:PoseRefinePairH5Dataset=None, timing=None, rgb_is_normalized=False, device='cuda'):
   logging.info("Welcome make_crop_data_batch")
   t_start = timing_clock() if timing is not None else None
   H,W = depth.shape[:2]
@@ -45,7 +45,6 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
 
   bs = 512
   rgb_rs = []
-  depth_rs = []
   normal_rs = []
   xyz_map_rs = []
 
@@ -59,16 +58,15 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
   for b in range(0,len(poseA),bs):
     extra = {}
     if isinstance(glctx, ModernglBatchRenderer):
-      rgb_r, depth_r, normal_r = glctx.render(K=K, H=H, W=W, ob_in_cams=poseA[b:b+bs], mesh_tensors=mesh_tensors, output_size=cfg['input_resize'], bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
+      rgb_r, _, normal_r = glctx.render(K=K, H=H, W=W, ob_in_cams=poseA[b:b+bs], mesh_tensors=mesh_tensors, output_size=cfg['input_resize'], bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
     else:
-      rgb_r, depth_r, normal_r = nvdiffrast_render(K=K, H=H, W=W, ob_in_cams=poseA[b:b+bs], context='cuda', get_normal=cfg['use_normal'], glctx=glctx, mesh_tensors=mesh_tensors, output_size=cfg['input_resize'], bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
+      rgb_r, _, normal_r = nvdiffrast_render(K=K, H=H, W=W, ob_in_cams=poseA[b:b+bs], context='cuda', get_normal=cfg['use_normal'], glctx=glctx, mesh_tensors=mesh_tensors, output_size=cfg['input_resize'], bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
     rgb_rs.append(rgb_r)
-    depth_rs.append(depth_r[...,None])
     normal_rs.append(normal_r)
     xyz_map_rs.append(extra['xyz_map'])
   # 只有一块时直接复用，避免 torch.cat 对单个张量再做一次整批复制
-  rgb_rs = (rgb_rs[0] if len(rgb_rs) == 1 else torch.cat(rgb_rs, dim=0)).permute(0,3,1,2) * 255
-  depth_rs = (depth_rs[0] if len(depth_rs) == 1 else torch.cat(depth_rs, dim=0)).permute(0,3,1,2)  #(B,1,H,W)
+  # 渲染 rgb 已是 [0,1]，不再乘 255，dataset.transform_batch 也不再除 255
+  rgb_rs = (rgb_rs[0] if len(rgb_rs) == 1 else torch.cat(rgb_rs, dim=0)).permute(0,3,1,2)
   xyz_map_rs = (xyz_map_rs[0] if len(xyz_map_rs) == 1 else torch.cat(xyz_map_rs, dim=0)).permute(0,3,1,2)  #(B,3,H,W)
   Ks =torch.as_tensor(K, device=device, dtype=torch.float).reshape(1,3,3)
   if cfg['use_normal']:
@@ -78,7 +76,10 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
   if timing is not None:
     t_warp = timing_clock()
 
-  rgbBs = kornia.geometry.transform.warp_perspective(torch.as_tensor(rgb, dtype=torch.float, device=device).permute(2,0,1)[None].expand(B,-1,-1,-1), tf_to_crops, dsize=render_size, mode='bilinear', align_corners=False)
+  rgb_c = torch.as_tensor(rgb, dtype=torch.float, device=device)
+  if not rgb_is_normalized:
+    rgb_c = rgb_c / 255.0  # 对单张相机图只除一次，之后 warp 与 [0,1] 渲染图一致
+  rgbBs = kornia.geometry.transform.warp_perspective(rgb_c.permute(2,0,1)[None].expand(B,-1,-1,-1), tf_to_crops, dsize=render_size, mode='bilinear', align_corners=False)
   if rgb_rs.shape[-2:]!=cfg['input_resize']:
     rgbAs = kornia.geometry.transform.warp_perspective(rgb_rs, tf_to_crops, dsize=render_size, mode='bilinear', align_corners=False)
   else:
@@ -100,7 +101,7 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
 
   mesh_diameters = torch.ones((len(rgbAs)), dtype=torch.float, device=device)*mesh_diameter
   pose_data = BatchPoseData(rgbAs=rgbAs, rgbBs=rgbBs, depthAs=None, depthBs=None, normalAs=normalAs, normalBs=normalBs, poseA=poseA, poseB=None, xyz_mapAs=xyz_mapAs, xyz_mapBs=xyz_mapBs, tf_to_crops=tf_to_crops, Ks=Ks, mesh_diameters=mesh_diameters)
-  pose_data = dataset.transform_batch(batch=pose_data, H_ori=H, W_ori=W, bound=1)
+  pose_data = dataset.transform_batch(batch=pose_data, H_ori=H, W_ori=W, bound=1, rgb_is_normalized=True)
 
   logging.info("pose batch data done")
   if timing is not None:
@@ -203,8 +204,7 @@ class PoseRefinePredictor:
     if mesh_tensors is None:
       mesh_tensors = make_mesh_tensors(mesh_centered, device=self.device)
 
-    rgb_tensor = torch.as_tensor(rgb, device=self.device, dtype=torch.float)
-    depth_tensor = torch.as_tensor(depth, device=self.device, dtype=torch.float)
+    rgb_tensor = torch.as_tensor(rgb, device=self.device, dtype=torch.float) * (1.0 / 255.0)  # 入口只归一化一次
     xyz_map_tensor = torch.as_tensor(xyz_map, device=self.device, dtype=torch.float)
     trans_normalizer = self.cfg['trans_normalizer']
     if not isinstance(trans_normalizer, float):
@@ -212,7 +212,7 @@ class PoseRefinePredictor:
 
     for _ in range(iteration):
       logging.info("making cropped data")
-      pose_data = make_crop_data_batch(self.cfg.input_resize, B_in_cams, mesh_centered, rgb_tensor, depth_tensor, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter, timing=timing, device=self.device)
+      pose_data = make_crop_data_batch(self.cfg.input_resize, B_in_cams, mesh_centered, rgb_tensor, depth, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter, timing=timing, rgb_is_normalized=True, device=self.device)
       B_in_cams = []
       for b in range(0, pose_data.rgbAs.shape[0], bs):
         A = torch.cat([pose_data.rgbAs[b:b+bs].to(self.device), pose_data.xyz_mapAs[b:b+bs].to(self.device)], dim=1).float()
@@ -276,7 +276,7 @@ class PoseRefinePredictor:
       logging.info("get_vis...")
       canvas = []
       padding = 2
-      pose_data = make_crop_data_batch(self.cfg.input_resize, torch.as_tensor(ob_centered_in_cams, device=self.device), mesh_centered, rgb, depth, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter, device=self.device)
+      pose_data = make_crop_data_batch(self.cfg.input_resize, torch.as_tensor(ob_centered_in_cams, device=self.device), mesh_centered, rgb_tensor, depth, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter, rgb_is_normalized=True, device=self.device)
       for id in range(0, len(B_in_cams)):
         rgbA_vis = (pose_data.rgbAs[id]*255).permute(1,2,0).data.cpu().numpy()
         rgbB_vis = (pose_data.rgbBs[id]*255).permute(1,2,0).data.cpu().numpy()
@@ -300,7 +300,7 @@ class PoseRefinePredictor:
         canvas.append(row)
       canvas = make_grid_image(canvas, nrow=1, padding=padding, pad_value=255)
 
-      pose_data = make_crop_data_batch(self.cfg.input_resize, B_in_cams, mesh_centered, rgb, depth, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter, device=self.device)
+      pose_data = make_crop_data_batch(self.cfg.input_resize, B_in_cams, mesh_centered, rgb_tensor, depth, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter, rgb_is_normalized=True, device=self.device)
       canvas_refined = []
       for id in range(0, len(B_in_cams)):
         rgbA_vis = (pose_data.rgbAs[id]*255).permute(1,2,0).data.cpu().numpy()
