@@ -164,7 +164,7 @@ def build_parser():
 
     p = sub.add_parser("prepare")
     p.add_argument("--frames_root", required=True)
-    p.add_argument("--yolo_model", default=str(PROJECT_ROOT / "models/yolo/best_openvino_model"))
+    p.add_argument("--yolo_model", default=str(PROJECT_ROOT / "models/yolo/1117_openvino_model"))
     p.add_argument("--target_class", type=int, default=0)
     p.add_argument("--conf", type=float, default=0.75)
     p.set_defaults(func=cmd_prepare)

@@ -7,7 +7,7 @@ source ~/energy_trace_ws/install/setup.bash
 export ROS_LOG_DIR=/tmp/rcia_ros_logs
 
 ros2 launch rcia_energy_trace_ros full_energy_tracking.launch.py \
-  yolo_model:=/path/to/RCIA_Energy_trace/models/yolo/best_openvino_model \
+  yolo_model:=/path/to/RCIA_Energy_trace/models/yolo/1117_openvino_model \
   target_class:=0 \
   detect_conf:=0.75 \
   stable_frames:=3 \

@@ -366,7 +366,7 @@ if __name__ == '__main__':
     parser.add_argument('--mesh_file', type=str,
                         default=str(PROJECT_ROOT / 'models/object/Str3D.obj'))
     parser.add_argument('--yolo_model', type=str,
-                        default=str(PROJECT_ROOT / 'models/yolo/best_openvino_model'))
+                        default=str(PROJECT_ROOT / 'models/yolo/1117_openvino_model'))
     parser.add_argument('--mask_center_frac', type=float, default=0.35,
                         help='框中心区域比例，用于取参考深度')
     parser.add_argument('--depth_window_half_m', type=float, default=0.11,

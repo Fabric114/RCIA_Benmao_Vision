@@ -18,7 +18,7 @@ sys.path.insert(0, str(FOUNDATIONPOSE_DIR))
 
 OPENVINO_VERSION_PREFIX = "2024.6.0"
 DEFAULT_OV_DEVICE = "CPU"
-DEFAULT_YOLO_MODEL = PROJECT_ROOT / "models/yolo/best_openvino_model"
+DEFAULT_YOLO_MODEL = PROJECT_ROOT / "models/yolo/1117_openvino_model"
 
 
 def require_import(name):
