@@ -38,6 +38,9 @@ def _foundationpose_cmd():
     render_backend = LaunchConfiguration("render_backend")
     net_backend = LaunchConfiguration("net_backend")
     ov_device = LaunchConfiguration("ov_device")
+    ov_precision = LaunchConfiguration("ov_precision")
+    ov_num_threads = LaunchConfiguration("ov_num_threads")
+    ov_cache_dir = LaunchConfiguration("ov_cache_dir")
     symmetry_mode = LaunchConfiguration("symmetry_mode")
     canonicalize_yaw = LaunchConfiguration("canonicalize_yaw")
     yaw_fallback_deg = LaunchConfiguration("yaw_fallback_deg")
@@ -107,6 +110,12 @@ def _foundationpose_cmd():
         net_backend,
         " -p ov_device:=",
         ov_device,
+        " -p ov_precision:=",
+        ov_precision,
+        " -p ov_num_threads:=",
+        ov_num_threads,
+        " -p ov_cache_dir:=",
+        ov_cache_dir,
         " -p symmetry_mode:=",
         symmetry_mode,
         " -p canonicalize_yaw:=",
@@ -263,6 +272,10 @@ def generate_launch_description():
         DeclareLaunchArgument("render_backend", default_value="moderngl"),
         DeclareLaunchArgument("net_backend", default_value="openvino"),
         DeclareLaunchArgument("ov_device", default_value="CPU"),
+        DeclareLaunchArgument("ov_precision", default_value="int8"),
+        DeclareLaunchArgument("ov_num_threads", default_value="0"),
+        # ROS 2 拒绝空值的 -p 参数，所以用 none 表示不启用缓存。
+        DeclareLaunchArgument("ov_cache_dir", default_value="none"),
         DeclareLaunchArgument("symmetry_mode", default_value="z12"),
         DeclareLaunchArgument("canonicalize_yaw", default_value="true"),
         DeclareLaunchArgument("yaw_fallback_deg", default_value="15.0"),

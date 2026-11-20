@@ -23,5 +23,27 @@ class RenderBackendValidationTest(unittest.TestCase):
         self.assertEqual(EstimatorConfig(mesh_file=MESH).render_backend, "nvdiffrast")
 
 
+class OpenVinoPrecisionValidationTest(unittest.TestCase):
+    def test_fp16_requires_gpu(self):
+        with self.assertRaises(ValueError):
+            build_estimator(EstimatorConfig(mesh_file=MESH, device="cpu", render_backend="moderngl",
+                                            net_backend="openvino", ov_device="CPU", ov_precision="fp16"))
+
+    def test_num_threads_rejected_on_gpu(self):
+        with self.assertRaises(ValueError):
+            build_estimator(EstimatorConfig(mesh_file=MESH, device="cpu", render_backend="moderngl",
+                                            net_backend="openvino", ov_device="GPU", ov_num_threads=4))
+
+    def test_unknown_ov_precision(self):
+        with self.assertRaises(ValueError):
+            build_estimator(EstimatorConfig(mesh_file=MESH, device="cpu", render_backend="moderngl",
+                                            net_backend="openvino", ov_precision="bf16"))
+
+    def test_default_ov_settings(self):
+        cfg = EstimatorConfig(mesh_file=MESH)
+        self.assertEqual(cfg.ov_precision, "fp32")
+        self.assertIsNone(cfg.ov_num_threads)
+
+
 if __name__ == "__main__":
     unittest.main()

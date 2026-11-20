@@ -389,13 +389,18 @@ if __name__ == '__main__':
                         help='包含 rgb/ 和 depth/ 子目录的数据路径（离线模式）')
 
     # 优化迭代次数
-    parser.add_argument('--est_refine_iter', type=int, default=3)
+    parser.add_argument('--est_refine_iter', type=int, default=2)
     parser.add_argument('--symmetry_mode', type=str, default='z12', choices=['none', 'z12'])
     parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda'])
     parser.add_argument('--render_backend', type=str, default='moderngl',
                         choices=['nvdiffrast', 'moderngl'])
     parser.add_argument('--net_backend', type=str, default='openvino', choices=['torch', 'openvino'])
     parser.add_argument('--ov_device', type=str, default='CPU', choices=['CPU', 'GPU'])
+    parser.add_argument('--ov_precision', type=str, default='fp32', choices=['fp32', 'fp16', 'int8'])
+    parser.add_argument('--ov_num_threads', type=int, default=0,
+                        help='OpenVINO 推理线程数，0 表示由 OpenVINO 自动决定（仅 ov_device=CPU）')
+    parser.add_argument('--ov_cache_dir', type=str, default='',
+                        help='OpenVINO 编译缓存目录，空字符串表示不启用')
     parser.add_argument('--no_canonicalize_yaw', action='store_true')
     parser.add_argument('--track_refine_iter', type=int, default=2)
 
@@ -460,7 +465,11 @@ if __name__ == '__main__':
     bundle = build_estimator(EstimatorConfig(mesh_file=args.mesh_file, debug=args.debug, debug_dir=debug_dir,
                                              symmetry_mode=args.symmetry_mode, device=args.device,
                                              render_backend=args.render_backend,
-                                             net_backend=args.net_backend, ov_device=args.ov_device))
+                                             net_backend=args.net_backend, ov_device=args.ov_device,
+                                             ov_precision=args.ov_precision,
+                                             ov_num_threads=args.ov_num_threads if args.ov_num_threads > 0 else None,
+                                             ov_cache_dir=(str(PROJECT_ROOT / args.ov_cache_dir)
+                                                           if args.ov_cache_dir else None)))
     est, mesh, to_origin, bbox_vis = bundle.estimator, bundle.mesh, bundle.to_origin, bundle.bbox_vis
     logging.info(f'Mesh: {len(mesh.vertices)} 顶点, {len(mesh.faces)} 面')
     logging.info('FoundationPose 初始化完成')

@@ -17,7 +17,7 @@ import torch
 from omegaconf import OmegaConf
 from learning.models.refine_network import RefineNet
 from learning.datasets.h5_dataset import *
-from learning.ov_model import OVModel, refine_ir_path
+from learning.ov_model import OVModel, ov_precision_to_ir, refine_ir_path
 from moderngl_renderer import ModernglBatchRenderer
 from Utils import *
 from datareader import *
@@ -114,7 +114,8 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
 
 
 class PoseRefinePredictor:
-  def __init__(self, device='cuda', net_backend='torch', ov_device='CPU'):
+  def __init__(self, device='cuda', net_backend='torch', ov_device='CPU', ov_cache_dir=None,
+               ov_precision='fp32', ov_num_threads=None):
     logging.info("welcome")
     if net_backend not in ('torch', 'openvino'):
       raise ValueError(f"unknown net_backend: {net_backend}")
@@ -160,7 +161,9 @@ class PoseRefinePredictor:
 
     self.dataset = PoseRefinePairH5Dataset(cfg=self.cfg, h5_file='', mode='test', device=self.device)
     if self.net_backend == 'openvino':
-      self.model = OVModel(refine_ir_path(f'{code_dir}/../../weights', 'fp32'), ('trans', 'rot'), device=ov_device)
+      ir_precision, hint = ov_precision_to_ir(ov_precision)
+      self.model = OVModel(refine_ir_path(f'{code_dir}/../../weights', ir_precision), ('trans', 'rot'),
+                           device=ov_device, num_threads=ov_num_threads, cache_dir=ov_cache_dir, precision_hint=hint)
     else:
       self.model = RefineNet(cfg=self.cfg, c_in=self.cfg['c_in']).to(self.device)
 

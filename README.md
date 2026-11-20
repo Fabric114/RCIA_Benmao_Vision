@@ -98,7 +98,7 @@ bash scripts/download_public_weights.sh
 
 ### 4. 部署到 Intel 小电脑（CPU + 核显）
 
-默认配置不使用 CUDA：`device=cpu`、`render_backend=moderngl`（EGL）、`net_backend=openvino`、`ov_device=CPU`，`est_refine_iter=3`。
+默认配置不使用 CUDA：`device=cpu`、`render_backend=moderngl`（EGL）、`net_backend=openvino`、`ov_device=CPU`，`est_refine_iter=2`。
 
 1. 让当前用户能访问 GPU 渲染设备，否则 EGL 会退化为软件渲染（`llvmpipe`），速度会很慢：
    ```bash

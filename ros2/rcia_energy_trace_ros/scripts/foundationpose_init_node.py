@@ -89,19 +89,22 @@ class FoundationPoseInitNode(Node):
         self.declare_parameter("request_required", True)
         self.declare_parameter("output_frame_id", "camera_color_optical_frame")
         self.declare_parameter("mesh_file", str(PROJECT_ROOT / "models/object/Str3D.obj"))
-        self.declare_parameter("yolo_model", str(PROJECT_ROOT / "models/yolo/best_openvino_model"))
+        self.declare_parameter("yolo_model", str(PROJECT_ROOT / "models/yolo/1117_openvino_model"))
         self.declare_parameter("mask_center_frac", 0.35)
         self.declare_parameter("depth_window_half_m", 0.11)
         self.declare_parameter("target_class", -1)
         self.declare_parameter("detect_conf", 0.75)
         self.declare_parameter("register_conf", 0.75)
         self.declare_parameter("stable_frames", 3)
-        self.declare_parameter("est_refine_iter", 3)
+        self.declare_parameter("est_refine_iter", 2)
         self.declare_parameter("symmetry_mode", "z12")
         self.declare_parameter("device", "cpu")
         self.declare_parameter("render_backend", "moderngl")
         self.declare_parameter("net_backend", "openvino")
         self.declare_parameter("ov_device", "CPU")
+        self.declare_parameter("ov_precision", "fp32")
+        self.declare_parameter("ov_num_threads", 0)  # 0 表示由 OpenVINO 自动决定
+        self.declare_parameter("ov_cache_dir", "none")  # none/off/空字符串表示不启用 OpenVINO 编译缓存
         self.declare_parameter("canonicalize_yaw", True)
         self.declare_parameter("yaw_fallback_deg", 15.0)
         self.declare_parameter("sync_tolerance_ms", 5.0)
@@ -274,6 +277,10 @@ class FoundationPoseInitNode(Node):
         self.get_logger().info(f"TIMING {msg.data}")
 
     def _create_estimator(self):
+        ov_num_threads = int(self.get_parameter("ov_num_threads").value)
+        ov_cache_dir = str(self.get_parameter("ov_cache_dir").value).strip()
+        if ov_cache_dir.lower() in ("", "none", "off"):
+            ov_cache_dir = ""
         bundle = build_estimator(
             EstimatorConfig(
                 mesh_file=self.get_parameter("mesh_file").value,
@@ -284,6 +291,9 @@ class FoundationPoseInitNode(Node):
                 render_backend=self.get_parameter("render_backend").value,
                 net_backend=self.get_parameter("net_backend").value,
                 ov_device=self.get_parameter("ov_device").value,
+                ov_precision=str(self.get_parameter("ov_precision").value),
+                ov_num_threads=None if ov_num_threads <= 0 else ov_num_threads,
+                ov_cache_dir=None if not ov_cache_dir else str(PROJECT_ROOT / ov_cache_dir),
             )
         )
         self.estimator_bundle = bundle

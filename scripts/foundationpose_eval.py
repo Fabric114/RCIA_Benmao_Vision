@@ -80,7 +80,7 @@ def cmd_prepare(args):
 def cmd_run(args):
     from scripts.foundationpose_factory import EstimatorConfig, build_estimator
 
-    cfg = EstimatorConfig(**{f.name: getattr(args, f.name) for f in fields(EstimatorConfig)})
+    cfg = EstimatorConfig(**{f.name: getattr(args, f.name, f.default) for f in fields(EstimatorConfig)})
     bundle = build_estimator(cfg)
     est = bundle.estimator
     results = {
@@ -180,6 +180,8 @@ def build_parser():
     p.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     p.add_argument("--net_backend", choices=["torch", "openvino"], default="torch")
     p.add_argument("--ov_device", choices=["CPU", "GPU"], default="CPU")
+    p.add_argument("--ov_precision", choices=["fp32", "fp16", "int8"], default="fp32")
+    p.add_argument("--ov_num_threads", type=int, default=None, help="CPU 上的 OpenVINO 线程数，默认由 OpenVINO 决定")
     p.add_argument("--render_backend", choices=["nvdiffrast", "moderngl"], default="nvdiffrast")
     p.add_argument("--mesh_file", default=str(PROJECT_ROOT / "models/object/Str3D.obj"))
     p.add_argument("--debug", type=int, default=0)

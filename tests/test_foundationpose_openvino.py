@@ -64,6 +64,27 @@ class OpenVinoParityTest(unittest.TestCase):
                 rtol=1e-3,
             )
 
+    def test_warmup_precompiles_and_keeps_outputs(self):
+        ov_refine = OVModel(refine_ir_path(self.tmp), ("trans", "rot"))
+        ov_refine.warmup((20,))
+        self.assertIn(((20, 6, 160, 160), (20, 6, 160, 160)), ov_refine._compiled)
+        self.assertEqual(len(ov_refine._compiled), 1)
+        A, B = torch.rand(20, 6, 160, 160), torch.rand(20, 6, 160, 160)
+        ref = self.refine_t(A, B)
+        out = ov_refine(A, B)
+        for k in ("trans", "rot"):
+            torch.testing.assert_close(out[k], ref[k], atol=1e-3, rtol=1e-3)
+
+        ov_score = OVModel(score_ir_path(self.tmp), ("score_logit",))
+        ov_score.warmup((20,))
+        self.assertIn(((20, 6, 160, 160), (20, 6, 160, 160)), ov_score._compiled)
+        torch.testing.assert_close(
+            ov_score(A, B, L=20)["score_logit"],
+            self.score_t(A, B, L=20)["score_logit"],
+            atol=1e-3,
+            rtol=1e-3,
+        )
+
     @skipUnless(INTEL_OV_GPU, "needs Intel GPU in OpenVINO")
     def test_refine_on_intel_gpu(self):
         ov = OVModel(refine_ir_path(self.tmp), ("trans", "rot"), device="GPU")
