@@ -65,9 +65,13 @@ def evaluate_m3t_tracking_health(
 ):
     params = params or TrackingHealthGateParams()
     if color_bgr is None or observed_depth_image is None:
-        return unevaluated_tracking_health("missing RGB-D frame for tracking health")
+        return unevaluated_tracking_health(
+            "missing RGB-D frame for tracking health", yolo_bbox=yolo_bbox
+        )
     if not np.all(np.isfinite(np.asarray(object_in_camera, dtype=np.float64))):
-        return unevaluated_tracking_health("non-finite M3T pose; not rendered")
+        return unevaluated_tracking_health(
+            "non-finite M3T pose; not rendered", yolo_bbox=yolo_bbox
+        )
 
     health = validate_m3t_pose_health(
         vertices=vertices,
@@ -162,20 +166,25 @@ def evaluate_m3t_tracking_health(
     )
 
 
-def unevaluated_tracking_health(reason):
-    """Result for a frame where health was not computed at all."""
+def unevaluated_tracking_health(reason, yolo_bbox=None):
+    """Single constructor for a frame whose health was not computed.
+
+    Every "not evaluated" path in the supervisor goes through here, so the
+    placeholder values are defined once. They are not evidence about the target.
+    """
+    no_yolo = yolo_bbox is None
     return TrackingHealthGateResult(
         tracking_ok=False,
         depth_ok=False,
-        projection_ok=False,
-        projection_center_ok=False,
-        projection_area_ok=False,
+        projection_ok=no_yolo,
+        projection_center_ok=no_yolo,
+        projection_area_ok=no_yolo,
         black_white_ok=False,
-        smoothness_ok=False,
+        smoothness_ok=True,
         depth_ratio=0.0,
         projection_iou=0.0,
-        projection_center_distance_ratio=float("inf"),
-        projection_area_ratio=0.0,
+        projection_center_distance_ratio=0.0 if no_yolo else float("inf"),
+        projection_area_ratio=1.0 if no_yolo else 0.0,
         translation_jump_m=0.0,
         rotation_jump_deg=0.0,
         rendered_pixel_count=0,

@@ -35,8 +35,8 @@ from scripts.initialization_gate import (  # noqa: E402
 )
 from scripts.m3t_tracking_health_gate import (  # noqa: E402
     TrackingHealthGateParams,
-    TrackingHealthGateResult,
     evaluate_m3t_tracking_health,
+    unevaluated_tracking_health,
 )
 from scripts.simple_tracking_lifecycle import (  # noqa: E402
     LifecycleObservation,
@@ -67,6 +67,13 @@ def pose_msg_to_matrix(msg):
     qy = float(msg.pose.orientation.y)
     qz = float(msg.pose.orientation.z)
     qw = float(msg.pose.orientation.w)
+    translation = [
+        float(msg.pose.position.x),
+        float(msg.pose.position.y),
+        float(msg.pose.position.z),
+    ]
+    if not all(math.isfinite(v) for v in (qx, qy, qz, qw, *translation)):
+        raise ValueError("pose contains non-finite values")
     norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
     if norm <= 1e-12:
         raise ValueError("pose quaternion norm must be non-zero")
@@ -83,11 +90,7 @@ def pose_msg_to_matrix(msg):
         ],
         dtype=np.float64,
     )
-    matrix[:3, 3] = [
-        float(msg.pose.position.x),
-        float(msg.pose.position.y),
-        float(msg.pose.position.z),
-    ]
+    matrix[:3, 3] = translation
     return matrix
 
 
@@ -470,6 +473,10 @@ class TrackingSupervisorNode(Node):
             matrix = pose_msg_to_matrix(msg)
         except ValueError as exc:
             self.get_logger().warning(f"Ignoring invalid M3T pose: {exc}")
+            # Drop the previous pose too, so an invalid message reads as "no pose"
+            # instead of keeping the last good pose alive.
+            with self.lock:
+                self.latest_m3t_pose = None
             return
         with self.lock:
             self.latest_m3t_pose = {
@@ -684,24 +691,25 @@ class TrackingSupervisorNode(Node):
         pair = inputs["pair"]
         camera_info = inputs["camera_info"]
         if pair is None or camera_info is None:
-            return self._empty_health("missing RGB-D/camera_info", yolo_bbox), True
+            return self._empty_health("missing RGB-D/camera_info", yolo_bbox), False
         try:
-            return (
-                evaluate_m3t_tracking_health(
-                    vertices=self.vertices,
-                    faces=self.faces,
-                    object_in_camera=m3t_pose["matrix"],
-                    previous_pose=self.previous_valid_m3t_pose,
-                    k_matrix=camera_info_to_matrix(camera_info),
-                    color_bgr=pair.color,
-                    observed_depth_image=pair.depth,
-                    yolo_bbox=yolo_bbox,
-                    params=self.tracking_health_params,
-                ),
-                True,
+            health = evaluate_m3t_tracking_health(
+                vertices=self.vertices,
+                faces=self.faces,
+                object_in_camera=m3t_pose["matrix"],
+                previous_pose=self.previous_valid_m3t_pose,
+                k_matrix=camera_info_to_matrix(camera_info),
+                color_bgr=pair.color,
+                observed_depth_image=pair.depth,
+                yolo_bbox=yolo_bbox,
+                params=self.tracking_health_params,
             )
         except Exception as exc:  # noqa: BLE001
-            return self._empty_health(f"validation error: {exc}", yolo_bbox), True
+            # A failed check says nothing about the target; the pose is not usable.
+            return self._empty_health(f"validation error: {exc}", yolo_bbox), False
+        # Unevaluated results (for example a non-finite pose rejected before
+        # rendering) also mark the pose as unusable for trusted output.
+        return health, bool(health.health_evaluated)
 
     def _tracking_filter_decision(
         self,
@@ -871,26 +879,7 @@ class TrackingSupervisorNode(Node):
 
     @staticmethod
     def _empty_health(reason, yolo_bbox):
-        return TrackingHealthGateResult(
-            tracking_ok=False,
-            depth_ok=False,
-            projection_ok=yolo_bbox is None,
-            projection_center_ok=yolo_bbox is None,
-            projection_area_ok=yolo_bbox is None,
-            black_white_ok=False,
-            smoothness_ok=True,
-            depth_ratio=0.0,
-            projection_iou=0.0,
-            projection_center_distance_ratio=0.0 if yolo_bbox is None else float("inf"),
-            projection_area_ratio=1.0 if yolo_bbox is None else 0.0,
-            translation_jump_m=0.0,
-            rotation_jump_deg=0.0,
-            rendered_pixel_count=0,
-            reason=reason,
-            health_evaluated=False,
-            valid_depth_overlap_count=0,
-            depth_evaluable=False,
-        )
+        return unevaluated_tracking_health(reason, yolo_bbox=yolo_bbox)
 
 
 def main():
