@@ -9,6 +9,9 @@ from scripts.m3t_tracking_health_gate import (
 )
 
 
+DEFAULT_COLOR = object()
+
+
 class M3TTrackingHealthGateTest(unittest.TestCase):
     def setUp(self):
         self.vertices = np.array(
@@ -34,6 +37,7 @@ class M3TTrackingHealthGateTest(unittest.TestCase):
             self.k_matrix,
             image_size=(160, 120),
         )
+        self.mask_depth_m = rendered_depth
         self.depth = np.zeros((120, 160), dtype=np.uint16)
         self.depth[self.mask > 0] = np.round(rendered_depth[self.mask > 0] * 1000).astype(
             np.uint16
@@ -172,6 +176,108 @@ class M3TTrackingHealthGateTest(unittest.TestCase):
         self.assertFalse(result.smoothness_ok)
         self.assertGreater(result.translation_jump_m, 0.05)
         self.assertFalse(result.tracking_ok)
+
+    def _evaluate_with_depth(self, depth, pose=None, color=DEFAULT_COLOR):
+        params = TrackingHealthGateParams(
+            min_rendered_overlap_pixels=80,
+            min_depth_consistency_ratio=0.90,
+            min_projection_iou=0.0,
+            max_projection_center_distance_ratio=10.0,
+            min_projection_area_ratio=0.0,
+            max_depth_residual_m=0.005,
+            require_smooth_pose=False,
+        )
+        return evaluate_m3t_tracking_health(
+            vertices=self.vertices,
+            faces=self.faces,
+            object_in_camera=self.pose if pose is None else pose,
+            previous_pose=self.pose,
+            k_matrix=self.k_matrix,
+            color_bgr=self.color if color is DEFAULT_COLOR else color,
+            observed_depth_image=depth,
+            yolo_bbox=None,
+            params=params,
+        )
+
+    def _depth_for_first_mask_pixels(self, count):
+        """Observed depth valid only at the first `count` rendered mask pixels."""
+        depth = np.zeros((120, 160), dtype=np.uint16)
+        ys, xs = np.nonzero(self.mask > 0)
+        keep_y, keep_x = ys[:count], xs[:count]
+        depth[keep_y, keep_x] = np.round(
+            self.mask_depth_m[keep_y, keep_x] * 1000
+        ).astype(np.uint16)
+        return depth
+
+    def test_zero_depth_is_unknown_not_measured_contradiction(self):
+        result = self._evaluate_with_depth(np.zeros((120, 160), dtype=np.uint16))
+
+        self.assertTrue(result.health_evaluated)
+        self.assertEqual(result.valid_depth_overlap_count, 0)
+        self.assertFalse(result.depth_evaluable)
+        self.assertFalse(result.depth_ok)
+
+    def test_valid_background_depth_is_measured_contradiction(self):
+        background = np.full((120, 160), 2000, dtype=np.uint16)
+
+        result = self._evaluate_with_depth(background)
+
+        self.assertTrue(result.health_evaluated)
+        self.assertGreaterEqual(result.valid_depth_overlap_count, 80)
+        self.assertTrue(result.depth_evaluable)
+        self.assertEqual(result.depth_ratio, 0.0)
+        self.assertFalse(result.depth_ok)
+
+    def test_depth_evaluable_boundary_is_80_valid_overlap_pixels(self):
+        below = self._evaluate_with_depth(self._depth_for_first_mask_pixels(79))
+        at = self._evaluate_with_depth(self._depth_for_first_mask_pixels(80))
+
+        self.assertEqual(below.valid_depth_overlap_count, 79)
+        self.assertFalse(below.depth_evaluable)
+        self.assertEqual(at.valid_depth_overlap_count, 80)
+        self.assertTrue(at.depth_evaluable)
+
+    def test_out_of_view_pose_is_evaluated_but_not_depth_evaluable(self):
+        outside = self.pose.copy()
+        outside[:3, 3] = [5.0, 0.0, 0.5]
+
+        result = self._evaluate_with_depth(self.depth, pose=outside)
+
+        self.assertTrue(result.health_evaluated)
+        self.assertEqual(result.rendered_pixel_count, 0)
+        self.assertEqual(result.valid_depth_overlap_count, 0)
+        self.assertFalse(result.depth_evaluable)
+
+    def test_nonfinite_depth_counts_as_invalid_overlap(self):
+        depth = np.full((120, 160), np.nan, dtype=np.float32)
+
+        result = self._evaluate_with_depth(depth)
+
+        self.assertTrue(result.health_evaluated)
+        self.assertEqual(result.valid_depth_overlap_count, 0)
+        self.assertFalse(result.depth_evaluable)
+
+    def test_nonfinite_pose_is_rejected_before_rendering(self):
+        from unittest import mock
+
+        nan_pose = self.pose.copy()
+        nan_pose[0, 3] = float("nan")
+
+        with mock.patch(
+            "scripts.tracking_watchdog_validation.render_model_buffers"
+        ) as render:
+            result = self._evaluate_with_depth(self.depth, pose=nan_pose)
+
+        render.assert_not_called()
+        self.assertFalse(result.health_evaluated)
+        self.assertFalse(result.depth_evaluable)
+
+    def test_missing_rgbd_is_not_evaluated(self):
+        result = self._evaluate_with_depth(self.depth, color=None)
+
+        self.assertFalse(result.health_evaluated)
+        self.assertFalse(result.depth_evaluable)
+        self.assertEqual(result.valid_depth_overlap_count, 0)
 
 
 if __name__ == "__main__":

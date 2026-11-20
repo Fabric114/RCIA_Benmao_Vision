@@ -38,6 +38,7 @@ class WatchdogHealth:
     pose_valid: bool
     rendered_pixel_count: int
     reason: str = ""
+    valid_depth_overlap_count: int = 0
 
     def to_dict(self):
         return asdict(self)
@@ -241,6 +242,7 @@ def build_watchdog_health(
         pose_valid=pose_valid,
         rendered_pixel_count=rendered_pixel_count,
         reason="; ".join(reason for reason in reasons if reason),
+        valid_depth_overlap_count=int(getattr(depth_result, "valid_overlap_count", 0)),
     )
 
 

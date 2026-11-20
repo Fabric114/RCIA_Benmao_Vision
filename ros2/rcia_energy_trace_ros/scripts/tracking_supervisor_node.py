@@ -887,6 +887,9 @@ class TrackingSupervisorNode(Node):
             rotation_jump_deg=0.0,
             rendered_pixel_count=0,
             reason=reason,
+            health_evaluated=False,
+            valid_depth_overlap_count=0,
+            depth_evaluable=False,
         )
 
 

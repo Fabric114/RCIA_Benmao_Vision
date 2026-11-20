@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from scripts.tracking_watchdog_validation import (
+    WatchdogHealth,
     WatchdogValidationParams,
     bbox_iou,
     build_watchdog_health,
@@ -216,6 +217,52 @@ class TrackingWatchdogValidationTest(unittest.TestCase):
         self.assertFalse(health.pose_valid)
         self.assertFalse(health.projection_area_success)
         self.assertIn("area", health.reason.lower())
+
+    def test_build_watchdog_health_carries_raw_valid_depth_overlap(self):
+        mask = np.zeros((80, 80), dtype=np.uint8)
+        mask[20:60, 20:60] = 255
+        depth_result = SimpleNamespace(
+            success=False,
+            consistency_ratio=0.0,
+            rendered_pixel_count=1600,
+            valid_overlap_count=37,
+            supported_pixel_count=0,
+            mean_abs_depth_residual_m=None,
+            reason="Need at least 80 rendered/observed depth overlap pixels, got 37",
+        )
+        appearance_result = SimpleNamespace(
+            success=True,
+            sampled_pixel_count=1600,
+            low_saturation_ratio=0.95,
+            black_white_support_ratio=0.80,
+            reason="",
+        )
+
+        health = build_watchdog_health(
+            yolo_bbox=None,
+            rendered_mask=mask,
+            depth_result=depth_result,
+            appearance_result=appearance_result,
+            previous_pose=None,
+            current_pose=np.eye(4),
+            params=WatchdogValidationParams(min_rendered_overlap_pixels=80),
+        )
+
+        self.assertEqual(health.valid_depth_overlap_count, 37)
+        self.assertEqual(WatchdogHealth(
+            yolo_visible=False,
+            depth_success=False,
+            depth_consistency_ratio=0.0,
+            black_white_success=False,
+            projection_iou=0.0,
+            projection_center_distance_ratio=0.0,
+            projection_area_ratio=0.0,
+            projection_center_success=True,
+            projection_area_success=True,
+            pose_jump_ok=True,
+            pose_valid=False,
+            rendered_pixel_count=0,
+        ).valid_depth_overlap_count, 0)
 
 
 if __name__ == "__main__":

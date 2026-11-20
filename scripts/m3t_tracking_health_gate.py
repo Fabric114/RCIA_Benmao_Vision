@@ -41,6 +41,9 @@ class TrackingHealthGateResult:
     rotation_jump_deg: float
     rendered_pixel_count: int
     reason: str = ""
+    health_evaluated: bool = False
+    valid_depth_overlap_count: int = 0
+    depth_evaluable: bool = False
 
     def to_dict(self):
         data = asdict(self)
@@ -62,23 +65,9 @@ def evaluate_m3t_tracking_health(
 ):
     params = params or TrackingHealthGateParams()
     if color_bgr is None or observed_depth_image is None:
-        return TrackingHealthGateResult(
-            tracking_ok=False,
-            depth_ok=False,
-            projection_ok=False,
-            projection_center_ok=False,
-            projection_area_ok=False,
-            black_white_ok=False,
-            smoothness_ok=False,
-            depth_ratio=0.0,
-            projection_iou=0.0,
-            projection_center_distance_ratio=float("inf"),
-            projection_area_ratio=0.0,
-            translation_jump_m=0.0,
-            rotation_jump_deg=0.0,
-            rendered_pixel_count=0,
-            reason="missing RGB-D frame for tracking health",
-        )
+        return unevaluated_tracking_health("missing RGB-D frame for tracking health")
+    if not np.all(np.isfinite(np.asarray(object_in_camera, dtype=np.float64))):
+        return unevaluated_tracking_health("non-finite M3T pose; not rendered")
 
     health = validate_m3t_pose_health(
         vertices=vertices,
@@ -166,6 +155,34 @@ def evaluate_m3t_tracking_health(
         rotation_jump_deg=float(rotation_jump_deg),
         rendered_pixel_count=int(health.rendered_pixel_count),
         reason="; ".join(reason for reason in reasons if reason),
+        health_evaluated=True,
+        valid_depth_overlap_count=int(health.valid_depth_overlap_count),
+        depth_evaluable=int(health.valid_depth_overlap_count)
+        >= int(params.min_rendered_overlap_pixels),
+    )
+
+
+def unevaluated_tracking_health(reason):
+    """Result for a frame where health was not computed at all."""
+    return TrackingHealthGateResult(
+        tracking_ok=False,
+        depth_ok=False,
+        projection_ok=False,
+        projection_center_ok=False,
+        projection_area_ok=False,
+        black_white_ok=False,
+        smoothness_ok=False,
+        depth_ratio=0.0,
+        projection_iou=0.0,
+        projection_center_distance_ratio=float("inf"),
+        projection_area_ratio=0.0,
+        translation_jump_m=0.0,
+        rotation_jump_deg=0.0,
+        rendered_pixel_count=0,
+        reason=reason,
+        health_evaluated=False,
+        valid_depth_overlap_count=0,
+        depth_evaluable=False,
     )
 
 
