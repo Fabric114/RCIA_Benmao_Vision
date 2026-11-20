@@ -178,6 +178,8 @@ class PoseRefinePredictor:
     self.last_trans_update = None
     self.last_rot_update = None
     self.last_timing_ms = {'render': 0.0, 'warp': 0.0, 'net': 0.0}
+    # INT8 校准用：不为 None 时，每次网络前追加 (A, B) 的 float32 拷贝。
+    self.calib_sink = None
 
 
   @torch.inference_mode()
@@ -221,6 +223,8 @@ class PoseRefinePredictor:
         A = torch.cat([pose_data.rgbAs[b:b+bs].to(self.device), pose_data.xyz_mapAs[b:b+bs].to(self.device)], dim=1).float()
         B = torch.cat([pose_data.rgbBs[b:b+bs].to(self.device), pose_data.xyz_mapBs[b:b+bs].to(self.device)], dim=1).float()
         logging.info("forward start")
+        if self.calib_sink is not None:
+          self.calib_sink.append((A.detach().float().cpu().numpy().copy(), B.detach().float().cpu().numpy().copy()))
         t_net = timing_clock()
         with torch.cuda.amp.autocast(enabled=self.amp and self.device == 'cuda' and self.net_backend == 'torch'):
           output = self.model(A,B)

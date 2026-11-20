@@ -193,6 +193,8 @@ class ScorePredictor:
       self.model.to(self.device).eval()
     logging.info("init done")
     self.last_timing_ms = {'render': 0.0, 'warp': 0.0, 'net': 0.0}
+    # INT8 校准用：不为 None 时，每次网络前追加 (A, B) 的 float32 拷贝。
+    self.calib_sink = None
 
 
   @torch.inference_mode()
@@ -230,6 +232,8 @@ class ScorePredictor:
         if pose_data.normalAs is not None:
           A = torch.cat([A, pose_data.normalAs.to(self.device).float()], dim=1)
           B = torch.cat([B, pose_data.normalBs.to(self.device).float()], dim=1)
+        if self.calib_sink is not None:
+          self.calib_sink.append((A.detach().float().cpu().numpy().copy(), B.detach().float().cpu().numpy().copy()))
         t_net = timing_clock()
         with torch.cuda.amp.autocast(enabled=self.amp and self.device == 'cuda' and self.net_backend == 'torch'):
           output = self.model(A, B, L=len(A))

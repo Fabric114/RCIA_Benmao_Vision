@@ -21,6 +21,23 @@ OV_IR_OK = all(
     (PROJECT_ROOT / "foundation_pose/weights" / run / "openvino" / name).exists()
     for run, name in (("2023-10-28-18-33-37", "refine_fp32.xml"), ("2024-01-11-20-02-45", "score_fp32.xml"))
 )
+INT8_IR_OK = all(
+    (PROJECT_ROOT / "foundation_pose/weights" / run / "openvino" / name).exists()
+    for run, name in (("2023-10-28-18-33-37", "refine_int8.xml"), ("2024-01-11-20-02-45", "score_int8.xml"))
+)
+
+
+def _intel_gpu_available():
+    try:
+        import openvino as ov
+
+        core = ov.Core()
+        return "GPU" in core.available_devices and "Intel" in core.get_property("GPU", "FULL_DEVICE_NAME")
+    except Exception:
+        return False
+
+
+INTEL_OV_GPU = _intel_gpu_available()
 
 
 def run_synthetic_register(cfg, iteration: int = 5):
@@ -109,6 +126,31 @@ class SyntheticRegisterCpuTest(unittest.TestCase):
                               net_backend="openvino", symmetry_mode="z12")
         c, a, timing = run_synthetic_register(cfg, iteration=3)
         print("cpu moderngl openvino iter3 center_err_m", c, "axis_err_deg", a)
+        print("timing_ms", timing)
+        self.assertLessEqual(c, 0.005)
+        self.assertLessEqual(a, 5.0)
+
+    @unittest.skipUnless(INT8_IR_OK, "needs exported OpenVINO INT8 IR")
+    def test_cpu_moderngl_openvino_int8(self):
+        from scripts.foundationpose_factory import EstimatorConfig
+
+        cfg = EstimatorConfig(mesh_file=MESH, device="cpu", render_backend="moderngl",
+                              net_backend="openvino", symmetry_mode="z12", ov_precision="int8")
+        c, a, timing = run_synthetic_register(cfg)
+        print("cpu moderngl openvino int8 center_err_m", c, "axis_err_deg", a)
+        print("timing_ms", timing)
+        self.assertLessEqual(c, 0.005)
+        self.assertLessEqual(a, 5.0)
+
+    @unittest.skipUnless(OV_IR_OK and INTEL_OV_GPU, "needs FP32 IR and Intel GPU in OpenVINO")
+    def test_cpu_moderngl_openvino_gpu_fp16(self):
+        from scripts.foundationpose_factory import EstimatorConfig
+
+        cfg = EstimatorConfig(mesh_file=MESH, device="cpu", render_backend="moderngl",
+                              net_backend="openvino", symmetry_mode="z12",
+                              ov_device="GPU", ov_precision="fp16")
+        c, a, timing = run_synthetic_register(cfg, iteration=3)
+        print("cpu moderngl openvino gpu fp16 center_err_m", c, "axis_err_deg", a)
         print("timing_ms", timing)
         self.assertLessEqual(c, 0.005)
         self.assertLessEqual(a, 5.0)

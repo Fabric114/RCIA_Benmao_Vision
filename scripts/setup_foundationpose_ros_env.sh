@@ -90,6 +90,7 @@ python -m pip install \
   kornia==0.7.2 \
   "moderngl>=5.10" \
   openvino==2024.6.0 \
+  nncf==2.14.1 \
   transformations==2024.6.1 \
   pandas \
   matplotlib \
