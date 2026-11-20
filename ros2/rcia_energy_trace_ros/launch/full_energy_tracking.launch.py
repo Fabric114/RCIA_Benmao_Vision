@@ -1,7 +1,11 @@
+from datetime import datetime
 from pathlib import Path
+from threading import Lock
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, SetEnvironmentVariable
+from launch.event_handlers import OnProcessIO
+from launch.actions import RegisterEventHandler
 from launch.substitutions import PathJoinSubstitution
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -9,6 +13,45 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 DEFAULT_PROJECT_ROOT = str(Path(__file__).resolve().parents[3])
+
+
+def _make_output_capture(log_file):
+    """Copy stdout/stderr emitted by launch-managed processes to one file."""
+    write_lock = Lock()
+    initialized = False
+
+    def write_output(event):
+        nonlocal initialized
+
+        text = event.text
+        if isinstance(text, bytes):
+            text = text.decode("utf-8", errors="replace")
+        if not text:
+            return
+
+        with write_lock:
+            if not initialized:
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                log_file.write_text(
+                    "# full_energy_tracking launch log\n"
+                    f"# started: {datetime.now().isoformat(timespec='seconds')}\n",
+                    encoding="utf-8",
+                )
+                initialized = True
+
+            with log_file.open("a", encoding="utf-8") as stream:
+                stream.write(text)
+                if not text.endswith("\n"):
+                    stream.write("\n")
+
+    return [
+        RegisterEventHandler(
+            OnProcessIO(
+                on_stdout=write_output,
+                on_stderr=write_output,
+            )
+        )
+    ]
 
 
 def _foundationpose_cmd():
@@ -52,7 +95,6 @@ def _foundationpose_cmd():
         "cd ",
         project_root,
         " && source scripts/foundationpose_env.sh && "
-        "export ROS_LOG_DIR=/tmp/rcia_ros_logs && "
         "python ros2/rcia_energy_trace_ros/scripts/foundationpose_init_node.py "
         "--ros-args "
         "-p color_topic:=",
@@ -126,6 +168,14 @@ def _foundationpose_cmd():
 
 
 def generate_launch_description():
+    project_root = Path(DEFAULT_PROJECT_ROOT)
+    log_root = project_root / "runtime" / "logs"
+    full_log_root = log_root / "full"
+    ros_log_root = log_root / "ros2"
+    run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+    ros_run_log_root = ros_log_root / run_stamp
+    log_file = full_log_root / f"full_energy_tracking_{run_stamp}.log"
+
     color_topic = LaunchConfiguration("color_topic")
     depth_topic = LaunchConfiguration("depth_topic")
     camera_info_topic = LaunchConfiguration("camera_info_topic")
@@ -145,6 +195,10 @@ def generate_launch_description():
     visualize = LaunchConfiguration("visualize")
     show_m3t_window = LaunchConfiguration("show_m3t_window")
     show_pipeline_window = LaunchConfiguration("show_pipeline_window")
+    record = LaunchConfiguration("record")
+    record_dir = LaunchConfiguration("record_dir")
+    pipeline_refresh_hz = LaunchConfiguration("pipeline_refresh_hz")
+    record_fps = LaunchConfiguration("record_fps")
     frame_history_size = LaunchConfiguration("frame_history_size")
     start_frame_tolerance_ms = LaunchConfiguration("start_frame_tolerance_ms")
     yolo_topic = LaunchConfiguration("yolo_topic")
@@ -156,6 +210,11 @@ def generate_launch_description():
     yaw_fallback_deg = LaunchConfiguration("yaw_fallback_deg")
 
     return LaunchDescription([
+        SetEnvironmentVariable(
+            name="ROS_LOG_DIR",
+            value=str(ros_run_log_root),
+        ),
+        *_make_output_capture(log_file),
         DeclareLaunchArgument(
             "project_root",
             default_value=DEFAULT_PROJECT_ROOT,
@@ -264,6 +323,10 @@ def generate_launch_description():
         DeclareLaunchArgument("show_m3t_window", default_value="false"),
         DeclareLaunchArgument("show_camera_preview", default_value="false"),
         DeclareLaunchArgument("show_pipeline_window", default_value="true"),
+        DeclareLaunchArgument("record", default_value="true"),
+        DeclareLaunchArgument("record_dir", default_value="record"),
+        DeclareLaunchArgument("pipeline_refresh_hz", default_value="10.0"),
+        DeclareLaunchArgument("record_fps", default_value="0.0"),
         DeclareLaunchArgument("show_foundationpose_windows", default_value="false"),
         DeclareLaunchArgument("frame_history_size", default_value="300"),
         DeclareLaunchArgument("start_frame_tolerance_ms", default_value="80.0"),
@@ -537,6 +600,10 @@ def generate_launch_description():
                 "tracking_health_topic": tracking_health_topic,
                 "output_topic": pipeline_topic,
                 "show_window": ParameterValue(show_pipeline_window, value_type=bool),
+                "record_enabled": ParameterValue(record, value_type=bool),
+                "record_dir": record_dir,
+                "refresh_hz": ParameterValue(pipeline_refresh_hz, value_type=float),
+                "record_fps": ParameterValue(record_fps, value_type=float),
             }],
         ),
         ExecuteProcess(

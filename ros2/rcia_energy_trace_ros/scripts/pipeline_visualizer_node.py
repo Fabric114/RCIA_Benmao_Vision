@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -57,6 +58,9 @@ class PipelineVisualizerNode(Node):
         self.declare_parameter("output_topic", "/energy/diagnostics/pipeline_view")
         self.declare_parameter("show_window", True)
         self.declare_parameter("window_name", "RCIA Energy Tracking Pipeline")
+        self.declare_parameter("record_enabled", False)
+        self.declare_parameter("record_dir", "record/pipeline")
+        self.declare_parameter("record_fps", 0.0)
         self.declare_parameter("panel_width", 480)
         self.declare_parameter("panel_height", 360)
         self.declare_parameter("refresh_hz", 10.0)
@@ -105,8 +109,40 @@ class PipelineVisualizerNode(Node):
         )
 
         refresh_hz = max(1.0, float(self.get_parameter("refresh_hz").value))
+        self.record_fps = float(self.get_parameter("record_fps").value) or refresh_hz
+        self.record_dir = (PROJECT_ROOT / str(self.get_parameter("record_dir").value)).resolve()
+        self.writer = None
+        self.record_error_reported = False
         self.timer = self.create_timer(1.0 / refresh_hz, self._render)
+        if bool(self.get_parameter("record_enabled").value):
+            self.get_logger().info(f"Recording pipeline view to {self.record_dir} at {self.record_fps:g} fps")
         self.get_logger().info("Pipeline visualizer is ready")
+
+    def _record_frame(self, view):
+        """Write the composed 4-panel view to an MJPG .avi, opening the file on the first frame."""
+        if self.writer is None:
+            self.record_dir.mkdir(parents=True, exist_ok=True)
+            path = self.record_dir / (datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".avi")
+            height, width = view.shape[:2]
+            writer = cv2.VideoWriter(
+                str(path), cv2.VideoWriter_fourcc(*"MJPG"), self.record_fps, (width, height), True
+            )
+            if not writer.isOpened():
+                if not self.record_error_reported:
+                    self.record_error_reported = True
+                    self.get_logger().error(f"Cannot open VideoWriter for {path}")
+                return
+            self.writer = writer
+            self.record_path = path
+            self.get_logger().info(f"Recording pipeline view: {path}")
+        self.writer.write(view)
+
+    def destroy_node(self):
+        if self.writer is not None:
+            self.writer.release()
+            self.writer = None
+            self.get_logger().info(f"Recording saved: {self.record_path}")
+        return super().destroy_node()
 
     def _image_cb(self, key):
         def callback(msg):
@@ -160,6 +196,9 @@ class PipelineVisualizerNode(Node):
         msg = self.bridge.cv2_to_imgmsg(view, encoding="bgr8")
         msg.header.stamp = self.get_clock().now().to_msg()
         self.pipeline_pub.publish(msg)
+
+        if bool(self.get_parameter("record_enabled").value):
+            self._record_frame(view)
 
         if bool(self.get_parameter("show_window").value):
             cv2.imshow(self.get_parameter("window_name").value, view)
