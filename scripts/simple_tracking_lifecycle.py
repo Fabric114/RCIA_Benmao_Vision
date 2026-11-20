@@ -28,6 +28,11 @@ class LifecycleObservation:
     filter_keep_m3t_alive: bool = False
     filter_request_reinit: bool = False
     filter_stop_m3t: bool = False
+    now_monotonic_ns: int = 0
+    m3t_startup_pending: bool = False
+    m3t_startup_failed: bool = False
+    m3t_stop_pending: bool = False
+    m3t_stop_ack_timed_out: bool = False
 
 
 @dataclass(frozen=True)
@@ -53,6 +58,10 @@ class SimpleTrackingLifecycle:
         self._candidate_reject_cooldown = 0
 
     def update(self, observation):
+        # Old M3T output may still be running, so nothing new starts until the
+        # stop is acknowledged. Candidates from before the stop are dropped.
+        if observation.m3t_stop_pending:
+            return self._wait_for_m3t_stop(observation)
         if self.state == NO_TRACK:
             return self._update_no_track(observation)
         if self.state == TRACKING:
@@ -62,6 +71,23 @@ class SimpleTrackingLifecycle:
         self.state = NO_TRACK
         self._reset_no_track_counts()
         return self._decision("reset_unknown_state", reason="unknown state")
+
+    def _wait_for_m3t_stop(self, observation):
+        # Stable-YOLO counting restarts after the stop is acknowledged, so a
+        # target seen during the wait must stay visible for a full stable run.
+        self._candidate_in_flight = False
+        self._stable_yolo_count = 0
+        if observation.m3t_stop_ack_timed_out:
+            return self._decision(
+                "stop_ack_timeout",
+                clear_candidate=True,
+                reason="stop ack timeout: no new initialization until m3t reports stopped",
+            )
+        return self._decision(
+            "wait_for_m3t_stop",
+            clear_candidate=True,
+            reason="waiting for m3t stop ack",
+        )
 
     def _update_no_track(self, observation):
         if observation.candidate_available:
@@ -127,8 +153,26 @@ class SimpleTrackingLifecycle:
         )
 
     def _update_tracking(self, observation):
+        if observation.m3t_startup_failed:
+            self.state = NO_TRACK
+            self._reset_no_track_counts()
+            return self._decision(
+                "stop_m3t_startup_failed",
+                publish_stop=True,
+                clear_candidate=True,
+                reason="m3t reported setup failure",
+            )
+
         if observation.tracking_reliability_state:
             return self._update_tracking_from_filter(observation)
+
+        if observation.m3t_startup_pending:
+            # Startup has its own deadline in the tracking filter. Until then it
+            # neither publishes a pose nor counts toward ordinary loss.
+            return self._decision(
+                "wait_for_m3t_startup",
+                reason="m3t starting; trusted output held",
+            )
 
         if (
             observation.m3t_status == "tracking"
@@ -195,6 +239,12 @@ class SimpleTrackingLifecycle:
                 publish_stop=True,
                 clear_candidate=True,
                 reason="tracking filter marked tracker degraded",
+            )
+
+        if observation.m3t_startup_pending:
+            return self._decision(
+                "wait_for_m3t_startup",
+                reason="m3t starting; trusted output held",
             )
 
         if observation.filter_publish_trusted_pose:

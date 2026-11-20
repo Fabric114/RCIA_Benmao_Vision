@@ -28,7 +28,29 @@ def parse_m3t_status_json(payload):
         "tracking_started": bool(data.get("tracking_started", False)),
         "have_initial_pose": bool(data.get("have_initial_pose", False)),
         "reason": str(data.get("reason", "")),
+        # Optional fields added by newer M3T nodes. Older nodes omit them, so
+        # they default to 0 ("not reported").
+        "initial_pose_stamp_ns": int(data.get("initial_pose_stamp_ns", 0) or 0),
+        "processed_frame_stamp_ns": int(data.get("processed_frame_stamp_ns", 0) or 0),
+        "latest_frame_stamp_ns": int(data.get("latest_frame_stamp_ns", 0) or 0),
+        "replayed_frames": int(data.get("replayed_frames", 0) or 0),
     }
+
+
+def m3t_status_belongs_to_session(status, expected_initial_pose_stamp_ns):
+    """Return False only when a status explicitly names a different initial pose.
+
+    A zero expected stamp means no session is active yet. A zero reported stamp
+    means the node predates session reporting, so the status is accepted for
+    compatibility.
+    """
+    expected = int(expected_initial_pose_stamp_ns or 0)
+    if expected <= 0:
+        return True
+    reported = int(status.get("initial_pose_stamp_ns", 0) or 0)
+    if reported <= 0:
+        return True
+    return reported == expected
 
 
 def candidate_matches_request(request, candidate_status, max_stamp_delta_ms):

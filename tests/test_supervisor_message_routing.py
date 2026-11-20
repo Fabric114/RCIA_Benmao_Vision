@@ -4,6 +4,7 @@ import unittest
 from scripts.supervisor_messages import (
     candidate_matches_request,
     candidate_status_is_failure,
+    m3t_status_belongs_to_session,
     make_init_request_json,
     parse_m3t_status_json,
 )
@@ -35,6 +36,39 @@ class SupervisorMessageRoutingTest(unittest.TestCase):
         self.assertTrue(status["tracking_started"])
         self.assertFalse(status["have_initial_pose"])
         self.assertEqual(status["stamp_ns"], 0)
+
+    def test_parse_m3t_status_json_reads_session_fields(self):
+        status = parse_m3t_status_json(
+            json.dumps(
+                {
+                    "state": "tracking",
+                    "initial_pose_stamp_ns": 42,
+                    "processed_frame_stamp_ns": 43,
+                    "latest_frame_stamp_ns": 44,
+                    "replayed_frames": 3,
+                }
+            )
+        )
+
+        self.assertEqual(status["initial_pose_stamp_ns"], 42)
+        self.assertEqual(status["processed_frame_stamp_ns"], 43)
+        self.assertEqual(status["latest_frame_stamp_ns"], 44)
+        self.assertEqual(status["replayed_frames"], 3)
+
+    def test_parse_m3t_status_json_defaults_session_fields_for_old_node(self):
+        status = parse_m3t_status_json('{"state":"stopped","stamp_ns":9}')
+
+        self.assertEqual(status["initial_pose_stamp_ns"], 0)
+        self.assertEqual(status["processed_frame_stamp_ns"], 0)
+        self.assertEqual(status["latest_frame_stamp_ns"], 0)
+        self.assertEqual(status["replayed_frames"], 0)
+
+    def test_session_check_rejects_only_explicit_mismatch(self):
+        self.assertTrue(m3t_status_belongs_to_session({"initial_pose_stamp_ns": 7}, 0))
+        self.assertTrue(m3t_status_belongs_to_session({"initial_pose_stamp_ns": 7}, 7))
+        self.assertFalse(m3t_status_belongs_to_session({"initial_pose_stamp_ns": 6}, 7))
+        # An old node reports no session stamp, so its status is accepted.
+        self.assertTrue(m3t_status_belongs_to_session({"initial_pose_stamp_ns": 0}, 7))
 
     def test_candidate_matches_request_by_request_id(self):
         request = {"request_id": "req-1", "stamp_ns": 1000}

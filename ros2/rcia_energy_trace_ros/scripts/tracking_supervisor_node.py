@@ -4,6 +4,7 @@ import math
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +48,7 @@ from scripts.simple_tracking_lifecycle import (  # noqa: E402
 from scripts.supervisor_messages import (  # noqa: E402
     candidate_matches_request,
     candidate_status_is_failure,
+    m3t_status_belongs_to_session,
     make_init_request_json,
     parse_m3t_status_json,
 )
@@ -131,6 +133,12 @@ def _bbox_area(bbox):
     return max(0.0, x2 - x1) * max(0.0, y2 - y1)
 
 
+# M3T status values that mean the tracker is still starting for the current
+# initial pose. "catching_up" is reserved for the replay work that follows.
+M3T_STARTUP_STATES = frozenset({"starting", "catching_up"})
+M3T_SETUP_FAILED_STATE = "setup_failed"
+
+
 class TrackingSupervisorNode(Node):
     def __init__(self):
         super().__init__("tracking_supervisor_node")
@@ -146,6 +154,19 @@ class TrackingSupervisorNode(Node):
         self.active_request = None
         self.request_counter = 0
         self.stop_in_flight = False
+        # Session state. The initial pose stamp identifies the M3T session that
+        # status and pose messages must belong to. Stop bookkeeping uses the
+        # monotonic clock and a status sequence number, so an old "stopped"
+        # message cannot acknowledge a stop sent later.
+        self.session_initial_pose_stamp_ns = 0
+        self.stop_sent_mono_ns = None
+        self.stop_sent_status_seq = 0
+        self.m3t_status_seq = 0
+        self.stop_ack_timeout_logged = False
+        self.health_cache = None
+        self.last_pose_color_stamp_ns = 0
+        self.last_color_stamp_ns = None
+        self.camera_time_reversed = False
 
         self.declare_parameter("color_topic", "/camera/color/image_raw")
         self.declare_parameter("depth_topic", "/camera/aligned_depth_to_color/image_raw")
@@ -213,6 +234,9 @@ class TrackingSupervisorNode(Node):
         self.declare_parameter("filter_degraded_presence_threshold", 0.55)
         self.declare_parameter("filter_lost_health_threshold", 0.35)
         self.declare_parameter("filter_lost_presence_threshold", 0.35)
+        self.declare_parameter("m3t_stop_ack_timeout_ms", 2000.0)
+        self.declare_parameter("tracking_pose_frame_tolerance_ms", 15.0)
+        self.declare_parameter("tracking_yolo_frame_tolerance_ms", 80.0)
 
         self.vertices, self.faces = load_obj_mesh(self.get_parameter("mesh_file").value)
         self.yaw_canonicalizer = None
@@ -408,6 +432,11 @@ class TrackingSupervisorNode(Node):
         stamp_ns = stamp_to_nanoseconds(msg.header.stamp)
         color = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         with self.lock:
+            # A backwards camera stamp means the stream restarted. The buffer
+            # drops such frames, so the supervisor flags it and ends the session.
+            if self.last_color_stamp_ns is not None and stamp_ns < self.last_color_stamp_ns:
+                self.camera_time_reversed = True
+            self.last_color_stamp_ns = stamp_ns
             self.latest_buffer.put_color(stamp_ns, color)
 
     def _depth_cb(self, msg):
@@ -464,9 +493,17 @@ class TrackingSupervisorNode(Node):
             self.get_logger().warning(f"Ignoring invalid M3T status: {exc}")
             return
         with self.lock:
+            self.m3t_status_seq += 1
+            if not self._accept_m3t_status(status):
+                return
             self.latest_m3t_status = status
-            if status.get("state") == "stopped":
+            if (
+                status.get("state") == "stopped"
+                and self.stop_in_flight
+                and self.m3t_status_seq > self.stop_sent_status_seq
+            ):
                 self.stop_in_flight = False
+                self.stop_ack_timeout_logged = False
 
     def _m3t_pose_cb(self, msg):
         try:
@@ -487,12 +524,19 @@ class TrackingSupervisorNode(Node):
 
     def _latest_inputs(self):
         now_ns = self._now_ns()
+        now_mono_ns = time.monotonic_ns()
         tolerance_ns = int(float(self.get_parameter("sync_tolerance_ms").value) * 1_000_000)
         max_age_ns = int(float(self.get_parameter("latest_frame_max_age_ms").value) * 1_000_000)
         with self.lock:
             pair = self.latest_buffer.get_latest_pair(now_ns, tolerance_ns, max_age_ns)
+            camera_reversed = self.camera_time_reversed
+            self.camera_time_reversed = False
             return {
                 "now_ns": now_ns,
+                "now_mono_ns": now_mono_ns,
+                "camera_time_reversed": camera_reversed,
+                "stop_pending": self.stop_in_flight,
+                "stop_sent_mono_ns": self.stop_sent_mono_ns,
                 "pair": pair,
                 "camera_info": self.latest_camera_info,
                 "yolo": None if self.latest_yolo is None else dict(self.latest_yolo),
@@ -513,6 +557,10 @@ class TrackingSupervisorNode(Node):
         candidate_result, candidate_available, candidate_pose_msg = self._candidate_validation(
             inputs, yolo_bbox
         )
+        if inputs["camera_time_reversed"]:
+            # Cached geometry belongs to the old camera timeline.
+            self.health_cache = None
+            self.previous_valid_m3t_pose = None
         tracking_health, m3t_pose_available = self._m3t_health(inputs, tracking_yolo_bbox)
         tracking_filter_decision = self._tracking_filter_decision(
             inputs=inputs,
@@ -522,12 +570,20 @@ class TrackingSupervisorNode(Node):
             m3t_pose_available=m3t_pose_available,
         )
         candidate_timed_out = self._candidate_timed_out(inputs["now_ns"], inputs["active_request"])
+        m3t_state = inputs["m3t_status"].get("state", "")
+        stop_pending = bool(inputs["stop_pending"])
+        stop_ack_timed_out = self._stop_ack_timed_out(inputs)
+        # Camera time going backwards ends the current session through the
+        # filter's stop path, so the tracker is not left running on stale input.
+        camera_reset_stop = bool(inputs["camera_time_reversed"]) and (
+            self.lifecycle.state == TRACKING
+        )
         observation = LifecycleObservation(
             yolo_visible=yolo_visible,
             candidate_available=candidate_available,
             candidate_valid=candidate_result.success,
             candidate_timed_out=candidate_timed_out,
-            m3t_status=inputs["m3t_status"].get("state", ""),
+            m3t_status=m3t_state,
             m3t_pose_available=m3t_pose_available,
             tracking_health_ok=tracking_health.tracking_ok,
             tracking_reliability_state=(
@@ -543,14 +599,24 @@ class TrackingSupervisorNode(Node):
                 False if tracking_filter_decision is None else tracking_filter_decision.request_reinit
             ),
             filter_stop_m3t=(
-                False if tracking_filter_decision is None else tracking_filter_decision.stop_m3t
+                camera_reset_stop
+                or (False if tracking_filter_decision is None else tracking_filter_decision.stop_m3t)
             ),
+            now_monotonic_ns=inputs["now_mono_ns"],
+            m3t_startup_pending=(
+                self.lifecycle.state == TRACKING and m3t_state in M3T_STARTUP_STATES
+            ),
+            m3t_startup_failed=m3t_state == M3T_SETUP_FAILED_STATE,
+            m3t_stop_pending=stop_pending,
+            m3t_stop_ack_timed_out=stop_ack_timed_out,
         )
         decision = self.lifecycle.update(observation)
         self._log_candidate_decision(decision, candidate_result)
+        self._log_stop_ack_timeout(decision)
         self._apply_decision(
             decision=decision,
             now_ns=inputs["now_ns"],
+            now_mono_ns=inputs["now_mono_ns"],
             yolo_bbox=yolo_bbox,
             yolo_conf=yolo_conf,
             candidate_pose_msg=candidate_pose_msg,
@@ -681,35 +747,137 @@ class TrackingSupervisorNode(Node):
                 return historical_pair
         return inputs["pair"]
 
+    def _m3t_rgbd_pair(self, inputs):
+        """Return the RGB-D pair closest to the pose stamp, or None.
+
+        The pair is never replaced by the latest frame: a pose rendered against
+        a different image would be measured against the wrong evidence.
+        """
+        m3t_pose = inputs["m3t_pose"]
+        if m3t_pose is None:
+            return None
+        tolerance_ns = int(
+            float(self.get_parameter("tracking_pose_frame_tolerance_ms").value) * 1_000_000
+        )
+        with self.lock:
+            return self.latest_buffer.get_pair_at(int(m3t_pose["stamp_ns"]), tolerance_ns)
+
+    def _yolo_frame_matches(self, inputs, color_stamp_ns):
+        yolo = inputs.get("yolo")
+        if yolo is None or int(color_stamp_ns) <= 0:
+            return False
+        tolerance_ns = int(
+            float(self.get_parameter("tracking_yolo_frame_tolerance_ms").value) * 1_000_000
+        )
+        return abs(int(yolo.get("stamp_ns", 0)) - int(color_stamp_ns)) <= tolerance_ns
+
+    def _yolo_observation_valid(self, inputs):
+        """YOLO is usable as evidence when it is fresh and matches the pose frame.
+
+        A fresh message with no detections is valid and means "no target seen".
+        """
+        yolo = inputs.get("yolo")
+        if yolo is None:
+            return False
+        age_ms = (inputs["now_ns"] - int(yolo.get("stamp_ns", 0))) / 1_000_000.0
+        if age_ms < 0.0 or age_ms > float(self.get_parameter("max_yolo_age_ms").value):
+            return False
+        return self._yolo_frame_matches(inputs, self.last_pose_color_stamp_ns)
+
     def _m3t_health(self, inputs, yolo_bbox):
         m3t_pose = inputs["m3t_pose"]
         if m3t_pose is None:
+            self.last_pose_color_stamp_ns = 0
             return self._empty_health("missing M3T pose", yolo_bbox), False
-        age_ms = (inputs["now_ns"] - int(m3t_pose["stamp_ns"])) / 1_000_000.0
+        pose_stamp_ns = int(m3t_pose["stamp_ns"])
+        if self.session_initial_pose_stamp_ns > 0 and (
+            pose_stamp_ns < self.session_initial_pose_stamp_ns
+        ):
+            self.last_pose_color_stamp_ns = 0
+            return self._empty_health("M3T pose predates current session", yolo_bbox), False
+        age_ms = (inputs["now_ns"] - pose_stamp_ns) / 1_000_000.0
         if age_ms > float(self.get_parameter("max_pose_age_ms").value):
+            self.last_pose_color_stamp_ns = 0
             return self._empty_health("stale M3T pose", yolo_bbox), False
-        pair = inputs["pair"]
+        # Geometry runs once per new pose. Repeated ticks only reuse the result,
+        # so duplicate status and timer ticks cannot count as new evidence.
+        cache = self.health_cache
+        if cache is None or cache["pose_stamp_ns"] != pose_stamp_ns:
+            cache = self._evaluate_pose_health(inputs, yolo_bbox)
+            cache["pose_stamp_ns"] = pose_stamp_ns
+            self.health_cache = cache
+        self.last_pose_color_stamp_ns = cache["color_stamp_ns"]
+        health = cache["health"]
+        # Unevaluated results (missing pair, non-finite pose rejected before
+        # rendering) mark the pose as unusable for trusted output.
+        return health, bool(health.health_evaluated)
+
+    def _evaluate_pose_health(self, inputs, yolo_bbox):
+        pair = self._m3t_rgbd_pair(inputs)
         camera_info = inputs["camera_info"]
-        if pair is None or camera_info is None:
-            return self._empty_health("missing RGB-D/camera_info", yolo_bbox), False
+        if pair is None:
+            return {
+                "health": self._empty_health("no RGB-D pair at pose stamp", yolo_bbox),
+                "color_stamp_ns": 0,
+            }
+        if camera_info is None:
+            return {
+                "health": self._empty_health("missing camera_info", yolo_bbox),
+                "color_stamp_ns": int(pair.color_stamp_ns),
+            }
+        # Only a YOLO box within the frame tolerance of this image may take part
+        # in the projection check.
+        geometry_yolo = yolo_bbox if self._yolo_frame_matches(inputs, pair.color_stamp_ns) else None
         try:
             health = evaluate_m3t_tracking_health(
                 vertices=self.vertices,
                 faces=self.faces,
-                object_in_camera=m3t_pose["matrix"],
+                object_in_camera=inputs["m3t_pose"]["matrix"],
                 previous_pose=self.previous_valid_m3t_pose,
                 k_matrix=camera_info_to_matrix(camera_info),
                 color_bgr=pair.color,
                 observed_depth_image=pair.depth,
-                yolo_bbox=yolo_bbox,
+                yolo_bbox=geometry_yolo,
                 params=self.tracking_health_params,
             )
         except Exception as exc:  # noqa: BLE001
             # A failed check says nothing about the target; the pose is not usable.
-            return self._empty_health(f"validation error: {exc}", yolo_bbox), False
-        # Unevaluated results (for example a non-finite pose rejected before
-        # rendering) also mark the pose as unusable for trusted output.
-        return health, bool(health.health_evaluated)
+            health = self._empty_health(f"validation error: {exc}", geometry_yolo)
+        return {"health": health, "color_stamp_ns": int(pair.color_stamp_ns)}
+
+    def _stop_ack_timed_out(self, inputs):
+        if not inputs["stop_pending"] or inputs["stop_sent_mono_ns"] is None:
+            return False
+        elapsed_ms = (inputs["now_mono_ns"] - int(inputs["stop_sent_mono_ns"])) / 1_000_000.0
+        return elapsed_ms > float(self.get_parameter("m3t_stop_ack_timeout_ms").value)
+
+    def _log_stop_ack_timeout(self, decision):
+        # Logged once per stop. The supervisor keeps waiting and does not resend.
+        if decision.action == "stop_ack_timeout" and not self.stop_ack_timeout_logged:
+            self.stop_ack_timeout_logged = True
+            self.get_logger().error(
+                "M3T stop was not acknowledged in time; no new initialization until stopped"
+            )
+
+    def _accept_m3t_status(self, status):
+        # Called with self.lock held. Only reads the session stamp.
+        return m3t_status_belongs_to_session(status, self.session_initial_pose_stamp_ns)
+
+    def _start_attempt(self, now_mono_ns, initial_pose_stamp_ns):
+        """Begin a new M3T session. Old pose and health state must not carry over."""
+        with self.lock:
+            self.session_initial_pose_stamp_ns = int(initial_pose_stamp_ns)
+            self.latest_m3t_pose = None
+            self.latest_m3t_status = {
+                "state": "starting",
+                "stamp_ns": int(initial_pose_stamp_ns),
+                "initial_pose_stamp_ns": int(initial_pose_stamp_ns),
+            }
+        self.previous_valid_m3t_pose = None
+        self.health_cache = None
+        self.last_pose_color_stamp_ns = 0
+        # The filter's startup deadline starts from the monotonic clock here.
+        self.tracking_state_filter.reset_for_tracking(now_monotonic_ns=now_mono_ns)
 
     def _tracking_filter_decision(
         self,
@@ -726,20 +894,31 @@ class TrackingSupervisorNode(Node):
             m3t_pose_age_ms = (
                 inputs["now_ns"] - int(inputs["m3t_pose"].get("stamp_ns", inputs["now_ns"]))
             ) / 1_000_000.0
+        pose = inputs["m3t_pose"]
         observation = TrackingStateObservation(
             yolo_visible=bool(raw_yolo_visible),
             yolo_confidence=float(yolo_conf),
+            yolo_observation_valid=self._yolo_observation_valid(inputs),
             m3t_status=str(inputs["m3t_status"].get("state", "")),
             m3t_pose_available=bool(m3t_pose_available),
             m3t_pose_age_ms=float(m3t_pose_age_ms),
+            health_evaluated=bool(tracking_health.health_evaluated),
+            valid_depth_overlap_count=int(tracking_health.valid_depth_overlap_count),
+            depth_evaluable=bool(tracking_health.depth_evaluable),
             depth_ok=bool(tracking_health.depth_ok),
             depth_ratio=float(tracking_health.depth_ratio),
             black_white_ok=bool(tracking_health.black_white_ok),
+            # A completed render counts as an evaluated projection, even when no
+            # YOLO box took part in it.
+            projection_evaluated=bool(tracking_health.health_evaluated),
             projection_ok=bool(tracking_health.projection_ok),
             projection_center_ok=bool(tracking_health.projection_center_ok),
             projection_area_ok=bool(tracking_health.projection_area_ok),
             smoothness_ok=bool(tracking_health.smoothness_ok),
             rendered_pixel_count=int(tracking_health.rendered_pixel_count),
+            pose_stamp_ns=0 if pose is None else int(pose["stamp_ns"]),
+            observation_stamp_ns=int(self.last_pose_color_stamp_ns),
+            now_monotonic_ns=int(inputs["now_mono_ns"]),
         )
         return self.tracking_state_filter.update(observation)
 
@@ -747,24 +926,35 @@ class TrackingSupervisorNode(Node):
         self,
         decision,
         now_ns,
+        now_mono_ns,
         yolo_bbox,
         yolo_conf,
         candidate_pose_msg,
         m3t_pose,
     ):
-        if decision.publish_init_request and yolo_bbox is not None:
+        if (
+            decision.publish_init_request
+            and yolo_bbox is not None
+            and not self.stop_in_flight
+        ):
             self._publish_init_request(now_ns, yolo_bbox, yolo_conf, decision.reason)
         if decision.clear_candidate:
             self._clear_active_request()
         if decision.publish_stop and not self.stop_in_flight:
             self.stop_pub.publish(Empty())
             self.stop_in_flight = True
+            self.stop_sent_mono_ns = now_mono_ns
+            self.stop_sent_status_seq = self.m3t_status_seq
+            self.stop_ack_timeout_logged = False
             self.tracking_state_filter.reset_to_search()
         if decision.publish_stop:
             self._reset_yaw_canonicalizer()
         if decision.publish_initial_pose and candidate_pose_msg is not None:
             self.initial_pose_pub.publish(candidate_pose_msg)
-            self.tracking_state_filter.reset_for_tracking()
+            self._start_attempt(
+                now_mono_ns,
+                stamp_to_nanoseconds(candidate_pose_msg.header.stamp),
+            )
             self._clear_active_request()
             self._reset_yaw_canonicalizer()
         if decision.publish_trusted_pose and m3t_pose is not None:
