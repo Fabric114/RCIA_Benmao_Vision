@@ -342,6 +342,15 @@ def generate_launch_description():
         DeclareLaunchArgument("symmetry_mode", default_value="z12"),
         DeclareLaunchArgument("canonicalize_yaw", default_value="true"),
         DeclareLaunchArgument("yaw_fallback_deg", default_value="15.0"),
+        DeclareLaunchArgument("filter_absence_timeout_ms", default_value="750.0"),
+        DeclareLaunchArgument("filter_conflict_timeout_ms", default_value="625.0"),
+        DeclareLaunchArgument("filter_suspect_timeout_ms", default_value="1000.0"),
+        DeclareLaunchArgument("filter_startup_timeout_ms", default_value="5000.0"),
+        DeclareLaunchArgument("filter_hard_depth_mismatch_ratio", default_value="0.05"),
+        DeclareLaunchArgument("m3t_stop_ack_timeout_ms", default_value="2000.0"),
+        DeclareLaunchArgument("tracking_pose_frame_tolerance_ms", default_value="15.0"),
+        DeclareLaunchArgument("tracking_yolo_frame_tolerance_ms", default_value="80.0"),
+        DeclareLaunchArgument("disappearance_confirm_frames", default_value="3"),
         Node(
             package="rcia_energy_trace_ros",
             executable="realsense_rgbd_publisher_node",
@@ -581,6 +590,42 @@ def generate_launch_description():
                 "preinit_min_black_white_support": ParameterValue(
                     LaunchConfiguration("preinit_min_black_white_support"),
                     value_type=float,
+                ),
+                "filter_absence_timeout_ms": ParameterValue(
+                    LaunchConfiguration("filter_absence_timeout_ms"),
+                    value_type=float,
+                ),
+                "filter_conflict_timeout_ms": ParameterValue(
+                    LaunchConfiguration("filter_conflict_timeout_ms"),
+                    value_type=float,
+                ),
+                "filter_suspect_timeout_ms": ParameterValue(
+                    LaunchConfiguration("filter_suspect_timeout_ms"),
+                    value_type=float,
+                ),
+                "filter_startup_timeout_ms": ParameterValue(
+                    LaunchConfiguration("filter_startup_timeout_ms"),
+                    value_type=float,
+                ),
+                "filter_hard_depth_mismatch_ratio": ParameterValue(
+                    LaunchConfiguration("filter_hard_depth_mismatch_ratio"),
+                    value_type=float,
+                ),
+                "m3t_stop_ack_timeout_ms": ParameterValue(
+                    LaunchConfiguration("m3t_stop_ack_timeout_ms"),
+                    value_type=float,
+                ),
+                "tracking_pose_frame_tolerance_ms": ParameterValue(
+                    LaunchConfiguration("tracking_pose_frame_tolerance_ms"),
+                    value_type=float,
+                ),
+                "tracking_yolo_frame_tolerance_ms": ParameterValue(
+                    LaunchConfiguration("tracking_yolo_frame_tolerance_ms"),
+                    value_type=float,
+                ),
+                "disappearance_confirm_frames": ParameterValue(
+                    LaunchConfiguration("disappearance_confirm_frames"),
+                    value_type=int,
                 ),
                 "canonicalize_yaw": ParameterValue(canonicalize_yaw, value_type=bool),
                 "yaw_fallback_deg": ParameterValue(yaw_fallback_deg, value_type=float),
