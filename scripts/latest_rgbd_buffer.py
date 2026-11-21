@@ -19,6 +19,12 @@ class LatestRgbdBuffer:
         self._depth_history_size = max(1, int(depth_history_size))
         self._color_history_size = max(1, int(color_history_size))
 
+    def clear(self):
+        self._color_stamp_ns = None
+        self._color = None
+        self._color_frames.clear()
+        self._depth_frames.clear()
+
     def put_color(self, stamp_ns, image):
         stamp_ns = int(stamp_ns)
         if self._color_stamp_ns is not None and stamp_ns < self._color_stamp_ns:

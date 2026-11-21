@@ -4,9 +4,11 @@ Only the renderer (evaluate_m3t_tracking_health), the ROS clock and the
 monotonic clock are replaced. Assertions are on the messages the node publishes.
 """
 
+import dataclasses
 import importlib.util
 import inspect
 import json
+from collections import deque
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 import threading
@@ -22,10 +24,17 @@ from scripts.m3t_tracking_health_gate import (
 )
 from scripts.simple_tracking_lifecycle import (
     LifecycleParams,
+    NO_TRACK,
     SimpleTrackingLifecycle,
     TRACKING,
 )
-from scripts.tracking_state_filter import TrackingStateFilter, TrackingStateFilterParams
+from scripts.tracking_state_filter import (
+    LOST,
+    M3T_OWNED,
+    M3T_SUSPECT,
+    TrackingStateFilter,
+    TrackingStateFilterParams,
+)
 from scripts.yolo_roi_gate import YoloRoiGateParams
 
 
@@ -66,6 +75,19 @@ def good_health():
         valid_depth_overlap_count=8000,
         depth_evaluable=True,
     )
+
+
+def weak_health():
+    """Rendered and evaluated, but the depth agreement is below the support bar.
+
+    The filter classifies this sample as weak evidence, which is not support.
+    """
+    return dataclasses.replace(good_health(), depth_ratio=0.3)
+
+
+def empty_background_health():
+    """The render covers almost nothing, so the target is not in the frame."""
+    return dataclasses.replace(good_health(), rendered_pixel_count=0)
 
 
 def make_pair(stamp_ns):
@@ -113,6 +135,15 @@ class Harness:
             "candidate_timeout_ms": 8000.0,
             "preinit_roi_gate_enabled": False,
             "m3t_stop_ack_timeout_ms": 2000.0,
+            "stable_yolo_frames": 3,
+            "disappearance_confirm_frames": 3,
+            "filter_absence_timeout_ms": 750.0,
+            "filter_conflict_timeout_ms": 625.0,
+            "filter_suspect_timeout_ms": 1000.0,
+            "filter_startup_timeout_ms": 5000.0,
+            "filter_hard_depth_mismatch_ratio": 0.05,
+            "tracking_min_depth_consistency_ratio": 0.60,
+            "min_rendered_overlap_pixels": 80,
         }
         self.node = self._make_node(params)
         self.module_time = SimpleNamespace(monotonic_ns=lambda: self.clock["mono"])
@@ -122,7 +153,7 @@ class Harness:
         self.time_patch = mock.patch.object(module, "time", self.module_time)
 
     def start(self):
-        self.evaluate_patch.start()
+        self.evaluate = self.evaluate_patch.start()
         self.time_patch.start()
 
     def stop(self):
@@ -136,9 +167,9 @@ class Harness:
     def advance(self, ms):
         self.clock["mono"] += int(ms * MS)
 
-    def tick(self, ms=125):
+    def tick(self, ms=125, yolo_detected=True):
         self.advance(ms)
-        self.node._yolo_cb(self.yolo_msg())
+        self.node._yolo_cb(self.yolo_msg(detected=yolo_detected))
         self.node._tick()
 
     def yolo_msg(self, detected=True):
@@ -173,6 +204,7 @@ class Harness:
             latest_buffer=mock.Mock(),
             latest_camera_info=SimpleNamespace(k=[1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0]),
             latest_yolo=None,
+            yolo_history=deque(maxlen=60),
             latest_candidate_pose=None,
             latest_candidate_status=None,
             latest_m3t_status={"state": "stopped", "stamp_ns": 0},
@@ -197,9 +229,24 @@ class Harness:
             yolo_roi_gate_params=YoloRoiGateParams(),
             yaw_canonicalizer=None,
             lifecycle=SimpleTrackingLifecycle(
-                LifecycleParams(stable_yolo_frames=2, lost_frames=3, out_of_view_frames=2)
+                LifecycleParams(
+                    stable_yolo_frames=params["stable_yolo_frames"],
+                    lost_frames=3,
+                    out_of_view_frames=2,
+                    disappearance_confirm_frames=params["disappearance_confirm_frames"],
+                )
             ),
-            tracking_state_filter=TrackingStateFilter(TrackingStateFilterParams()),
+            tracking_state_filter=TrackingStateFilter(
+                TrackingStateFilterParams(
+                    min_valid_depth_overlap_pixels=params["min_rendered_overlap_pixels"],
+                    min_depth_support_ratio=params["tracking_min_depth_consistency_ratio"],
+                    hard_depth_mismatch_ratio=params["filter_hard_depth_mismatch_ratio"],
+                    absence_timeout_ms=params["filter_absence_timeout_ms"],
+                    conflict_timeout_ms=params["filter_conflict_timeout_ms"],
+                    suspect_timeout_ms=params["filter_suspect_timeout_ms"],
+                    startup_timeout_ms=params["filter_startup_timeout_ms"],
+                )
+            ),
             init_request_pub=mock.Mock(),
             initial_pose_pub=mock.Mock(),
             stop_pub=mock.Mock(),
@@ -228,8 +275,8 @@ class Harness:
 
         Returns the initial pose stamp of the new session.
         """
-        self.tick()
-        self.tick()
+        for _ in range(self.node.lifecycle.params.stable_yolo_frames):
+            self.tick()
         request_id = self.node.active_request["request_id"]
         stamp = self.now_ns
         self.node._candidate_pose_cb(pose_msg(stamp))
@@ -350,6 +397,114 @@ class TrackingSupervisorLifecycleIntegrationTest(unittest.TestCase):
 
         self.node.stop_pub.publish.assert_called_once()
         self.assertEqual(self.node.lifecycle.state, "NO_TRACK")
+
+    def _own_target(self, session_stamp):
+        self.h.status("tracking", initial_stamp=session_stamp)
+        for _ in range(3):
+            self.h.feed_pose()
+            self.h.tick()
+        self.assertEqual(self.node.tracking_state_filter.state, M3T_OWNED)
+
+    def _last_state(self):
+        return json.loads(self.node.state_pub.publish.call_args.args[0].data)
+
+    def _last_health(self):
+        return json.loads(self.node.health_pub.publish.call_args.args[0].data)
+
+    def test_owned_to_suspect_withholds_trusted_pose_then_recovers(self):
+        session_stamp = self.h.start_session()
+        self._own_target(session_stamp)
+        self.node.trusted_pose_pub.publish.reset_mock()
+
+        self.h.evaluate.return_value = weak_health()
+        self.h.feed_pose()
+        self.h.tick()
+        self.assertEqual(self.node.tracking_state_filter.state, M3T_SUSPECT)
+        self.node.trusted_pose_pub.publish.assert_not_called()
+        self.assertFalse(self._last_state()["trusted"])
+
+        self.h.evaluate.return_value = good_health()
+        self.h.feed_pose()
+        self.h.tick()
+        self.assertEqual(self.node.tracking_state_filter.state, M3T_SUSPECT)
+        self.node.trusted_pose_pub.publish.assert_not_called()
+
+        self.h.feed_pose()
+        self.h.tick()
+        self.assertEqual(self.node.tracking_state_filter.state, M3T_OWNED)
+        self.assertGreater(self.node.trusted_pose_pub.publish.call_count, 0)
+        self.assertTrue(self._last_state()["trusted"])
+        self.node.stop_pub.publish.assert_not_called()
+
+    def test_absent_target_on_empty_background_stops_m3t_then_reinitializes_new_mineral(self):
+        session_stamp = self.h.start_session()
+        self._own_target(session_stamp)
+        requests_before = self.node.init_request_pub.publish.call_count
+        self.h.evaluate.return_value = empty_background_health()
+
+        first_absent_ns = None
+        for _ in range(12):
+            self.h.feed_pose()
+            self.h.tick(yolo_detected=False)
+            if first_absent_ns is None:
+                first_absent_ns = self.h.now_ns
+            if self.node.stop_pub.publish.called:
+                break
+
+        self.node.stop_pub.publish.assert_called_once()
+        self.assertEqual(self.h.now_ns - first_absent_ns, 750 * MS)
+        self.assertFalse(self._last_state()["trusted"])
+        self.assertEqual(self._last_state()["action"], "stop_m3t")
+        self.assertEqual(self.node.init_request_pub.publish.call_count, requests_before)
+
+        self.h.status("stopped", initial_stamp=session_stamp)
+        for _ in range(2):
+            self.h.tick()
+        self.assertEqual(self.node.init_request_pub.publish.call_count, requests_before)
+        self.h.tick()
+        self.assertEqual(self.node.init_request_pub.publish.call_count, requests_before + 1)
+
+    def test_support_timeout_with_yolo_visible_waits_for_disappearance_before_reinit(self):
+        session_stamp = self.h.start_session()
+        self._own_target(session_stamp)
+        requests_before = self.node.init_request_pub.publish.call_count
+        self.h.evaluate.return_value = weak_health()
+
+        first_weak_ns = None
+        for _ in range(12):
+            self.h.feed_pose()
+            self.h.tick()
+            if first_weak_ns is None:
+                first_weak_ns = self.h.now_ns
+            if self.node.stop_pub.publish.called:
+                break
+
+        self.node.stop_pub.publish.assert_called_once()
+        self.assertEqual(self.h.now_ns - first_weak_ns, 1000 * MS)
+        self.assertEqual(self.node.tracking_state_filter.state, LOST)
+        self.assertEqual(self._last_health()["tracking_filter"]["reason"], "support_timeout")
+        self.assertEqual(self.node.lifecycle.state, NO_TRACK)
+
+        # YOLO keeps seeing the target while the tracker stops. No new request.
+        self.h.status("stopped", initial_stamp=session_stamp)
+        for _ in range(5):
+            self.h.tick()
+        self.assertEqual(self._last_state()["action"], "wait_for_target_disappearance")
+        self.assertEqual(self.node.init_request_pub.publish.call_count, requests_before)
+
+        # Two absent frames are not enough. The third confirms the old target left.
+        for _ in range(2):
+            self.h.tick(yolo_detected=False)
+        self.assertEqual(self._last_state()["action"], "wait_for_target_disappearance")
+        self.h.tick(yolo_detected=False)
+        self.assertEqual(self._last_state()["action"], "wait_for_target")
+
+        # A new target needs three stable frames before the request.
+        for _ in range(2):
+            self.h.tick()
+        self.assertEqual(self.node.init_request_pub.publish.call_count, requests_before)
+        self.h.tick()
+        self.assertEqual(self.node.init_request_pub.publish.call_count, requests_before + 1)
 
 
 if __name__ == "__main__":

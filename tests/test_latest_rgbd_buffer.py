@@ -79,6 +79,24 @@ class LatestRgbdBufferTest(unittest.TestCase):
 
         self.assertIsNone(buffer.get_pair_at(target_stamp_ns=1_000, tolerance_ns=5))
 
+    def test_clear_allows_older_stamps_after_reset(self):
+        buffer = LatestRgbdBuffer()
+        buffer.put_color(2_000, "color_before")
+        buffer.put_depth(2_000, "depth_before")
+
+        buffer.clear()
+        self.assertIsNone(buffer.get_latest_pair(now_ns=2_010, tolerance_ns=5, max_age_ns=100))
+
+        buffer.put_color(1_000, "color_after")
+        buffer.put_depth(1_000, "depth_after")
+        pair = buffer.get_latest_pair(now_ns=1_010, tolerance_ns=5, max_age_ns=100)
+
+        self.assertIsNotNone(pair)
+        self.assertEqual(pair.color_stamp_ns, 1_000)
+        self.assertEqual(pair.depth_stamp_ns, 1_000)
+        self.assertEqual(pair.color, "color_after")
+        self.assertEqual(pair.depth, "depth_after")
+
 
 if __name__ == "__main__":
     unittest.main()
