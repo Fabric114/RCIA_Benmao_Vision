@@ -25,6 +25,7 @@ add_subdirectory("${RCIA_ENERGY_TRACE_ROOT}/third_party/m3t" "${CMAKE_CURRENT_BI
 add_library(ros_frame_cameras
   src/axis_normal_viewer.cpp
   src/ros_frame_cameras.cpp
+  src/tracking_session.cpp
 )
 target_include_directories(ros_frame_cameras PUBLIC
   include
@@ -72,6 +73,36 @@ ament_target_dependencies(realsense_rgbd_publisher_node
   rclcpp
   sensor_msgs
 )
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_ros_frame_cameras
+    test/test_ros_frame_cameras.cpp
+  )
+  target_include_directories(test_ros_frame_cameras PRIVATE
+    include
+    "${RCIA_ENERGY_TRACE_ROOT}/third_party/m3t/include"
+  )
+  target_link_libraries(test_ros_frame_cameras ros_frame_cameras m3t)
+  ament_target_dependencies(test_ros_frame_cameras
+    sensor_msgs
+    cv_bridge
+  )
+
+  ament_add_gtest(test_tracking_session
+    test/test_tracking_session.cpp
+  )
+  target_include_directories(test_tracking_session PRIVATE
+    include
+    "${RCIA_ENERGY_TRACE_ROOT}/third_party/m3t/include"
+  )
+  target_link_libraries(test_tracking_session ros_frame_cameras m3t)
+  ament_target_dependencies(test_tracking_session
+    sensor_msgs
+    cv_bridge
+  )
+endif()
 
 install(TARGETS
   ros_frame_cameras
