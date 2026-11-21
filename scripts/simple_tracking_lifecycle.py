@@ -12,6 +12,7 @@ class LifecycleParams:
     lost_frames: int = 5
     out_of_view_frames: int = 5
     candidate_reject_cooldown_frames: int = 5
+    disappearance_confirm_frames: int = 3
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,8 @@ class LifecycleObservation:
     m3t_startup_failed: bool = False
     m3t_stop_pending: bool = False
     m3t_stop_ack_timed_out: bool = False
+    filter_has_been_owned: bool = False
+    filter_absence_confirmed: bool = False
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,8 @@ class SimpleTrackingLifecycle:
         self._bad_tracking_count = 0
         self._out_of_view_count = 0
         self._candidate_reject_cooldown = 0
+        self._awaiting_disappearance = False
+        self._disappearance_count = 0
 
     def update(self, observation):
         # Old M3T output may still be running, so nothing new starts until the
@@ -77,6 +82,7 @@ class SimpleTrackingLifecycle:
         # target seen during the wait must stay visible for a full stable run.
         self._candidate_in_flight = False
         self._stable_yolo_count = 0
+        self._disappearance_count = 0
         if observation.m3t_stop_ack_timed_out:
             return self._decision(
                 "stop_ack_timeout",
@@ -90,6 +96,9 @@ class SimpleTrackingLifecycle:
         )
 
     def _update_no_track(self, observation):
+        if self._awaiting_disappearance:
+            return self._update_awaiting_disappearance(observation)
+
         if observation.candidate_available:
             self._candidate_in_flight = False
             if observation.candidate_valid:
@@ -150,6 +159,30 @@ class SimpleTrackingLifecycle:
         return self._decision(
             "wait_for_stable_yolo" if observation.yolo_visible else "wait_for_target",
             reason="waiting for target",
+        )
+
+    def _update_awaiting_disappearance(self, observation):
+        clear_candidate = observation.candidate_available or observation.candidate_timed_out
+        if clear_candidate:
+            self._candidate_in_flight = False
+            self._stable_yolo_count = 0
+
+        self._disappearance_count = self._count_if(
+            not observation.yolo_visible, self._disappearance_count
+        )
+        if self._disappearance_count >= max(1, int(self.params.disappearance_confirm_frames)):
+            self._awaiting_disappearance = False
+            self._disappearance_count = 0
+            self._stable_yolo_count = 0
+            return self._decision(
+                "wait_for_target",
+                clear_candidate=clear_candidate,
+                reason="previous target disappeared; ready for new target",
+            )
+        return self._decision(
+            "wait_for_target_disappearance",
+            clear_candidate=clear_candidate,
+            reason="waiting for previous target to leave view before reinit",
         )
 
     def _update_tracking(self, observation):
@@ -224,6 +257,12 @@ class SimpleTrackingLifecycle:
         if observation.filter_stop_m3t:
             self.state = NO_TRACK
             self._reset_no_track_counts()
+            if observation.filter_has_been_owned and not observation.filter_absence_confirmed:
+                self._awaiting_disappearance = True
+                self._disappearance_count = 0
+            else:
+                self._awaiting_disappearance = False
+                self._disappearance_count = 0
             return self._decision(
                 "stop_m3t",
                 publish_stop=True,

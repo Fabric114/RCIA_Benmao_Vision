@@ -317,6 +317,98 @@ class SimpleTrackingLifecycleTest(unittest.TestCase):
         self.assertEqual(stopped.action, "request_candidate")
         self.assertTrue(stopped.publish_init_request)
 
+    def test_owned_stop_without_absence_blocks_reinit_until_target_disappears(self):
+        lifecycle = self.tracking_lifecycle()
+        stop = lifecycle.update(
+            LifecycleObservation(
+                yolo_visible=True,
+                m3t_status="tracking",
+                tracking_reliability_state="LOST",
+                filter_stop_m3t=True,
+                filter_has_been_owned=True,
+                filter_absence_confirmed=False,
+            )
+        )
+        self.assertTrue(stop.publish_stop)
+        self.assertEqual(lifecycle.state, "NO_TRACK")
+
+        for _ in range(10):
+            blocked = lifecycle.update(
+                LifecycleObservation(yolo_visible=True, m3t_status="stopped")
+            )
+            self.assertFalse(blocked.publish_init_request)
+            self.assertEqual(blocked.action, "wait_for_target_disappearance")
+
+        confirm_frames = lifecycle.params.disappearance_confirm_frames
+        for _ in range(confirm_frames - 1):
+            lifecycle.update(LifecycleObservation(yolo_visible=False, m3t_status="stopped"))
+        gone = lifecycle.update(LifecycleObservation(yolo_visible=False, m3t_status="stopped"))
+        self.assertEqual(gone.action, "wait_for_target")
+        self.assertFalse(gone.publish_init_request)
+
+        requests = []
+        for _ in range(lifecycle.params.stable_yolo_frames):
+            decision = lifecycle.update(
+                LifecycleObservation(yolo_visible=True, m3t_status="stopped")
+            )
+            requests.append(decision.publish_init_request)
+
+        self.assertEqual(requests.count(True), 1)
+        self.assertTrue(requests[-1])
+
+    def test_owned_stop_with_absence_confirmed_allows_new_target_after_stable_yolo(self):
+        lifecycle = self.tracking_lifecycle()
+        stop = lifecycle.update(
+            LifecycleObservation(
+                yolo_visible=False,
+                m3t_status="tracking",
+                tracking_reliability_state="LOST",
+                filter_stop_m3t=True,
+                filter_has_been_owned=True,
+                filter_absence_confirmed=True,
+            )
+        )
+        self.assertTrue(stop.publish_stop)
+        stopped = lifecycle.update(LifecycleObservation(yolo_visible=False, m3t_status="stopped"))
+        self.assertEqual(stopped.action, "wait_for_target")
+
+        first = lifecycle.update(LifecycleObservation(yolo_visible=True, m3t_status="stopped"))
+        second = lifecycle.update(LifecycleObservation(yolo_visible=True, m3t_status="stopped"))
+
+        self.assertFalse(first.publish_init_request)
+        self.assertEqual(second.action, "request_candidate")
+        self.assertTrue(second.publish_init_request)
+
+    def test_disappearance_counter_resets_if_target_reappears_early(self):
+        lifecycle = self.tracking_lifecycle()
+        lifecycle.update(
+            LifecycleObservation(
+                yolo_visible=True,
+                m3t_status="tracking",
+                tracking_reliability_state="LOST",
+                filter_stop_m3t=True,
+                filter_has_been_owned=True,
+                filter_absence_confirmed=False,
+            )
+        )
+        confirm_frames = lifecycle.params.disappearance_confirm_frames
+
+        for _ in range(2):
+            decision = lifecycle.update(LifecycleObservation(yolo_visible=False, m3t_status="stopped"))
+            self.assertEqual(decision.action, "wait_for_target_disappearance")
+
+        reappeared = lifecycle.update(LifecycleObservation(yolo_visible=True, m3t_status="stopped"))
+        self.assertEqual(reappeared.action, "wait_for_target_disappearance")
+        self.assertFalse(reappeared.publish_init_request)
+
+        for _ in range(confirm_frames - 1):
+            decision = lifecycle.update(LifecycleObservation(yolo_visible=False, m3t_status="stopped"))
+            self.assertEqual(decision.action, "wait_for_target_disappearance")
+            self.assertFalse(decision.publish_init_request)
+
+        gone = lifecycle.update(LifecycleObservation(yolo_visible=False, m3t_status="stopped"))
+        self.assertEqual(gone.action, "wait_for_target")
+
     def tracking_lifecycle(self):
         lifecycle = self.make_lifecycle()
         lifecycle.update(LifecycleObservation(yolo_visible=True))
