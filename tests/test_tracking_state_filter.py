@@ -116,8 +116,9 @@ def depth_contradiction(ms, **changes):
 def owned_filter(params=None):
     state_filter = TrackingStateFilter(params or make_params())
     state_filter.reset_for_tracking(now_monotonic_ns=BASE_NS)
+    # YOLO sees the target during startup, so its absence timer starts later.
     for ms in (0, 125, 250):
-        decision = state_filter.update(good(ms))
+        decision = state_filter.update(good(ms, yolo_visible=True))
     assert decision.reliability_state == M3T_OWNED
     return state_filter
 
@@ -208,6 +209,7 @@ class TrackingStateFilterTest(unittest.TestCase):
         self.assertTrue(decisions[-1].request_reinit)
         self.assertFalse(decisions[-1].stop_m3t)
         self.assertEqual(decisions[-1].owned_confirm_streak, 0)
+        self.assertFalse(decisions[-1].has_been_owned)
 
     def test_future_age_nan_or_inf_is_not_support(self):
         cases = [
@@ -225,18 +227,36 @@ class TrackingStateFilterTest(unittest.TestCase):
                 self.assertFalse(any(d.reliability_state == M3T_OWNED for d in decisions))
                 self.assertFalse(any(d.publish_trusted_pose for d in decisions))
 
-    # Owned state: outside, weak support, unknown evidence
+    # Owned state: brief YOLO dropouts, absence, conflict
 
-    def test_owned_tracking_survives_unstable_yolo_without_reinit(self):
+    def test_owned_tracking_survives_brief_yolo_dropouts(self):
         state_filter = owned_filter()
-        decisions = self.run_samples(
-            state_filter, [good(375 + 125 * i, yolo_visible=False) for i in range(20)]
-        )
-        decision = decisions[-1]
-        self.assertEqual(decision.reliability_state, M3T_OWNED)
-        self.assertTrue(decision.publish_trusted_pose)
-        self.assertFalse(decision.request_reinit)
-        self.assertFalse(decision.stop_m3t)
+        samples = [
+            good(375, yolo_visible=False),
+            good(500, yolo_visible=False),  # 250 ms dropout
+            good(625, yolo_visible=True),
+            good(750, yolo_visible=False),
+            good(875, yolo_visible=False),  # 250 ms dropout
+            good(1000, yolo_visible=True),
+        ]
+        decisions = self.run_samples(state_filter, samples)
+
+        self.assertTrue(all(d.reliability_state == M3T_OWNED for d in decisions))
+        self.assertTrue(all(d.publish_trusted_pose for d in decisions))
+        self.assertFalse(any(d.request_reinit or d.stop_m3t for d in decisions))
+
+    def test_owned_good_depth_with_continuous_yolo_absence_stops_at_750ms(self):
+        state_filter = owned_filter()
+        samples = [good(ms, yolo_visible=False) for ms in range(375, 1126, 125)]
+        decisions = self.run_samples(state_filter, samples)
+
+        self.assertEqual(decisions[5].reliability_state, M3T_OWNED)  # 625 ms absent
+        self.assertTrue(decisions[5].publish_trusted_pose)
+        self.assertEqual(decisions[6].reliability_state, LOST)  # 750 ms absent
+        self.assertEqual(decisions[6].reason, "out_of_view")
+        self.assertTrue(decisions[6].stop_m3t)
+        self.assertTrue(decisions[6].has_been_owned)
+        self.assertTrue(decisions[6].absence_confirmed)
 
     def test_static_outside_eventually_stops_after_absence_timeout(self):
         state_filter = owned_filter()
@@ -246,77 +266,77 @@ class TrackingStateFilterTest(unittest.TestCase):
         self.assertEqual(decisions[0].reliability_state, M3T_SUSPECT)
         self.assertEqual(decisions[0].evidence_kind, EVIDENCE_ABSENCE)
         self.assertTrue(all(not d.publish_trusted_pose for d in decisions))
-        self.assertEqual(decisions[-2].reliability_state, M3T_SUSPECT)
-        self.assertEqual(decisions[-1].reliability_state, LOST)
-        self.assertEqual(decisions[-1].reason, "out_of_view")
-        self.assertTrue(decisions[-1].stop_m3t)
+        self.assertEqual(decisions[5].reliability_state, M3T_SUSPECT)  # 1000 ms: 625 ms elapsed
+        self.assertEqual(decisions[6].reliability_state, LOST)  # 1125 ms: 750 ms elapsed
+        self.assertEqual(decisions[6].reason, "out_of_view")
+        self.assertTrue(decisions[6].stop_m3t)
+        self.assertTrue(decisions[6].absence_confirmed)
 
-    def test_weak_depth_without_yolo_times_out_at_500ms(self):
+    def test_weak_depth_with_absent_yolo_times_out_at_750ms_as_out_of_view(self):
         state_filter = owned_filter()
-        samples = [weak(ms) for ms in range(375, 876, 125)]
+        samples = [weak(ms) for ms in range(375, 1126, 125)]
         decisions = self.run_samples(state_filter, samples)
 
         self.assertEqual(decisions[0].reliability_state, M3T_SUSPECT)
         self.assertFalse(any(d.reliability_state == M3T_OWNED for d in decisions))
-        self.assertEqual(decisions[-3].reliability_state, M3T_SUSPECT)  # 625 ms: 250 ms elapsed
-        self.assertEqual(decisions[-1].reliability_state, LOST)
+        self.assertEqual(decisions[5].reliability_state, M3T_SUSPECT)  # 625 ms elapsed
+        self.assertEqual(decisions[6].reliability_state, LOST)  # 750 ms elapsed
+        self.assertEqual(decisions[6].reason, "out_of_view")
+        self.assertTrue(decisions[6].stop_m3t)
+        self.assertTrue(decisions[6].absence_confirmed)
+
+    def test_unknown_depth_without_yolo_times_out_at_750ms_with_absence_confirmed(self):
+        state_filter = owned_filter()
+        samples = [unknown(ms) for ms in range(375, 1126, 125)]
+        decisions = self.run_samples(state_filter, samples)
+
+        self.assertEqual(decisions[5].reliability_state, M3T_SUSPECT)  # 625 ms elapsed
+        self.assertEqual(decisions[6].reliability_state, LOST)  # 750 ms elapsed
+        self.assertEqual(decisions[6].reason, "out_of_view")
+        self.assertTrue(decisions[6].stop_m3t)
+        self.assertTrue(decisions[6].absence_confirmed)
+
+    def test_owned_conflict_goes_to_suspect_then_lost_never_reinit(self):
+        state_filter = owned_filter()
+        samples = [conflict(ms) for ms in range(375, 1376, 125)]
+        decisions = self.run_samples(state_filter, samples)
+
+        self.assertFalse(any(d.request_reinit for d in decisions))
+        self.assertEqual(decisions[0].reliability_state, M3T_SUSPECT)
+        self.assertEqual(decisions[-2].reliability_state, M3T_SUSPECT)  # 875 ms elapsed
+        self.assertEqual(decisions[-1].reliability_state, LOST)  # 1000 ms elapsed
         self.assertEqual(decisions[-1].reason, "support_timeout")
         self.assertTrue(decisions[-1].stop_m3t)
+        self.assertTrue(decisions[-1].has_been_owned)
+        self.assertFalse(decisions[-1].absence_confirmed)
 
-    def test_unknown_depth_without_yolo_uses_500ms_timeout(self):
+    def test_visible_target_weak_support_keeps_1000ms_suspect_deadline(self):
         state_filter = owned_filter()
-        samples = [unknown(ms) for ms in range(375, 876, 125)]
-        decisions = self.run_samples(state_filter, samples)
-
-        self.assertEqual(decisions[-2].reliability_state, M3T_SUSPECT)  # 750 ms: 375 ms elapsed
-        self.assertEqual(decisions[-1].reliability_state, LOST)  # 875 ms: 500 ms elapsed
-        self.assertEqual(decisions[-1].reason, "observation_unavailable")
-        self.assertTrue(decisions[-1].stop_m3t)
-
-    def test_visible_target_conflict_requests_reinit_after_625ms(self):
-        state_filter = owned_filter()
-        samples = [conflict(ms) for ms in (375, 500, 625, 750, 875, 1000)]
-        decisions = self.run_samples(state_filter, samples)
-
-        self.assertEqual(decisions[4].reliability_state, M3T_SUSPECT)  # 500 ms elapsed
-        self.assertEqual(decisions[-1].reliability_state, REINIT_NEEDED)  # 625 ms elapsed
-        self.assertEqual(decisions[-1].reason, "external_conflict")
-        self.assertTrue(decisions[-1].request_reinit)
-        self.assertFalse(decisions[-1].stop_m3t)
-
-    def test_owned_tracking_reinitializes_on_sustained_external_conflict(self):
-        state_filter = owned_filter()
-        decisions = self.run_samples(
-            state_filter, [conflict(ms) for ms in (375, 500, 625, 750, 875, 1000)]
-        )
-        self.assertEqual(decisions[-1].reliability_state, REINIT_NEEDED)
-        self.assertTrue(decisions[-1].request_reinit)
-        self.assertFalse(decisions[-1].stop_m3t)
-
-    def test_visible_target_weak_support_keeps_2000ms_suspect_deadline(self):
-        state_filter = owned_filter()
-        samples = [weak(ms, yolo_visible=True, yolo_confidence=0.8) for ms in range(375, 2376, 125)]
+        samples = [weak(ms, yolo_visible=True, yolo_confidence=0.8) for ms in range(375, 1376, 125)]
         decisions = self.run_samples(state_filter, samples)
 
         self.assertFalse(any(d.publish_trusted_pose for d in decisions))
-        self.assertEqual(decisions[-2].reliability_state, M3T_SUSPECT)  # 2250 ms
-        self.assertEqual(decisions[-1].reliability_state, REINIT_NEEDED)  # 2375 ms
+        self.assertFalse(any(d.request_reinit for d in decisions))
+        self.assertEqual(decisions[-2].reliability_state, M3T_SUSPECT)  # 1250 ms: 875 ms elapsed
+        self.assertEqual(decisions[-1].reliability_state, LOST)  # 1375 ms: 1000 ms elapsed
         self.assertEqual(decisions[-1].reason, "support_timeout")
-        self.assertFalse(decisions[-1].stop_m3t)
+        self.assertTrue(decisions[-1].stop_m3t)
+        self.assertFalse(decisions[-1].absence_confirmed)
 
-    def test_depth_contradiction_without_yolo_is_not_out_of_view(self):
+    def test_depth_contradiction_with_absent_yolo_stops_as_out_of_view(self):
         state_filter = owned_filter()
         decisions = self.run_samples(
-            state_filter, [depth_contradiction(ms) for ms in (375, 500, 625, 750, 875)]
+            state_filter, [depth_contradiction(ms) for ms in range(375, 1126, 125)]
         )
         self.assertEqual(decisions[-1].reliability_state, LOST)
-        self.assertEqual(decisions[-1].reason, "support_timeout")
+        self.assertEqual(decisions[-1].reason, "out_of_view")
+        self.assertTrue(decisions[-1].absence_confirmed)
 
     def test_appearance_pass_cannot_override_bad_depth(self):
         state_filter = owned_filter()
         decisions = self.run_samples(
             state_filter,
-            [depth_contradiction(ms, smoothness_ok=True) for ms in (375, 500, 625, 750, 875)],
+            [depth_contradiction(ms, smoothness_ok=True) for ms in range(375, 1126, 125)],
         )
         self.assertFalse(any(d.reliability_state == M3T_OWNED for d in decisions))
         self.assertEqual(decisions[-1].reliability_state, LOST)
@@ -372,23 +392,24 @@ class TrackingStateFilterTest(unittest.TestCase):
         decision = state_filter.update(good(250))
         self.assertEqual(decision.reliability_state, M3T_OWNED)
 
-    def test_duplicate_samples_do_not_refresh_the_no_target_deadline(self):
+    def test_duplicate_samples_do_not_refresh_the_absence_deadline(self):
         state_filter = owned_filter()
         self.run_samples(state_filter, [unknown(375)])
 
-        # Same pose stamp, but the monotonic clock has advanced to 875 ms.
-        duplicate = unknown(375, now_monotonic_ns=BASE_NS + 875 * 1_000_000)
+        # Same pose stamp, but the monotonic clock has advanced to 1125 ms.
+        duplicate = unknown(375, now_monotonic_ns=BASE_NS + 1125 * 1_000_000)
         decision = state_filter.update(duplicate)
         self.assertEqual(decision.reliability_state, LOST)
-        self.assertEqual(decision.reason, "observation_unavailable")
+        self.assertEqual(decision.reason, "out_of_view")
+        self.assertFalse(decision.observation_is_new)
 
     def test_good_sample_cannot_cancel_an_expired_deadline(self):
         state_filter = owned_filter()
-        self.run_samples(state_filter, [unknown(ms) for ms in (375, 500, 625, 750)])
+        self.run_samples(state_filter, [unknown(ms) for ms in (375, 500, 625, 750, 875, 1000)])
 
-        decision = state_filter.update(good(875))
+        decision = state_filter.update(good(1125, yolo_visible=False))
         self.assertEqual(decision.reliability_state, LOST)
-        self.assertEqual(decision.reason, "observation_unavailable")
+        self.assertEqual(decision.reason, "out_of_view")
         self.assertTrue(decision.stop_m3t)
 
     def test_absence_evidence_is_counted_as_absence(self):
@@ -417,8 +438,49 @@ class TrackingStateFilterTest(unittest.TestCase):
             "suspect_elapsed_ms",
             "evidence_kind",
             "observation_is_new",
+            "has_been_owned",
+            "absence_confirmed",
         ):
             self.assertIn(key, payload)
+
+    def test_startup_yolo_absence_does_not_carry_over_into_owned(self):
+        state_filter = self.fresh_filter()
+        # 1000 ms of YOLO absence during startup (> 750 ms absence_timeout_ms).
+        for ms in range(0, 876, 125):
+            state_filter.update(unknown(ms, yolo_visible=False))
+        # Confirm ownership with good support while YOLO is still temporarily absent.
+        for ms in (1000, 1125, 1250):
+            decision = state_filter.update(good(ms, yolo_visible=False))
+        self.assertEqual(decision.reliability_state, M3T_OWNED)
+        # Absence timer should start fresh from OWNED, not fire immediately at 1375 ms.
+        next_decision = state_filter.update(good(1375, yolo_visible=False))
+        self.assertEqual(next_decision.reliability_state, M3T_OWNED)
+
+    def test_single_frame_yolo_flicker_on_suspect_timeout_does_not_confirm_absence(self):
+        state_filter = owned_filter()
+        # Keep YOLO visible up to 875 ms of weak support (suspect starts at 375 ms).
+        self.run_samples(state_filter, [weak(ms, yolo_visible=True) for ms in (375, 500, 625, 750, 875, 1000, 1125, 1250)])
+        # At 1375 ms (1000 ms suspect timeout), YOLO flickers False for one frame only.
+        decision = state_filter.update(weak(1375, yolo_visible=False))
+        self.assertEqual(decision.reliability_state, LOST)
+        self.assertTrue(decision.has_been_owned)
+        self.assertFalse(decision.absence_confirmed)
+
+    def test_unknown_depth_with_visible_or_invalid_yolo_reports_observation_unavailable(self):
+        for changes in (
+            dict(yolo_visible=True, yolo_observation_valid=True),
+            dict(yolo_visible=False, yolo_observation_valid=False),
+        ):
+            with self.subTest(changes=changes):
+                state_filter = owned_filter()
+                decisions = self.run_samples(
+                    state_filter,
+                    [unknown(ms, **changes) for ms in range(375, 1376, 125)],
+                )
+                self.assertEqual(decisions[-2].reliability_state, M3T_SUSPECT)
+                self.assertEqual(decisions[-1].reliability_state, LOST)
+                self.assertEqual(decisions[-1].reason, "observation_unavailable")
+                self.assertFalse(decisions[-1].absence_confirmed)
 
 
 if __name__ == "__main__":

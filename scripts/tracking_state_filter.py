@@ -36,10 +36,9 @@ class TrackingStateFilterParams:
     min_valid_depth_overlap_pixels: int = 80
     min_depth_support_ratio: float = 0.60
     hard_depth_mismatch_ratio: float = 0.05
-    absence_timeout_ms: float = 1500.0
+    absence_timeout_ms: float = 750.0
     conflict_timeout_ms: float = 625.0
-    suspect_timeout_ms: float = 2000.0
-    no_target_support_timeout_ms: float = 500.0
+    suspect_timeout_ms: float = 1000.0
     startup_timeout_ms: float = 5000.0
 
     # Deprecated frame-count fields. They are accepted so existing launch files
@@ -104,6 +103,8 @@ class TrackingStateDecision:
     suspect_elapsed_ms: float = 0.0
     evidence_kind: str = EVIDENCE_UNKNOWN
     observation_is_new: bool = False
+    has_been_owned: bool = False
+    absence_confirmed: bool = False
 
     def to_dict(self):
         return asdict(self)
@@ -159,8 +160,8 @@ class TrackingStateFilter:
         self._suspect_since_ns = None
         self._conflict_since_ns = None
         self._absence_since_ns = None
-        self._no_target_since_ns = None
-        self._no_target_reason = None
+        self._yolo_absent_since_ns = None
+        self._has_been_owned = False
 
     def update(self, observation):
         now = int(observation.now_monotonic_ns)
@@ -170,26 +171,31 @@ class TrackingStateFilter:
         is_new = self._is_new_sample(observation, now)
 
         if self.state in {REINIT_NEEDED, LOST}:
-            return self._decision(self.state, f"state held: {self.state}", kind, False, now)
+            return self._decision(
+                observation, self.state, f"state held: {self.state}", kind, False, now
+            )
 
         # A deadline that expired before this sample wins over it, so a late
         # good sample cannot cancel a timeout that already ran out.
-        expired = self._expired_deadline(observation, now)
+        expired = self._expired_deadline(observation, now, kind)
         self._apply_sample(observation, now, is_new, kind)
         if expired is None:
-            expired = self._expired_deadline(observation, now)
+            expired = self._expired_deadline(observation, now, kind)
         if expired is not None:
             self.state, reason = expired
-            return self._decision(self.state, reason, kind, is_new, now)
+            return self._decision(observation, self.state, reason, kind, is_new, now)
         return self._advance(observation, now, is_new, kind)
 
     def _advance(self, observation, now, is_new, kind):
         if self.state == M3T_STARTING:
             if self.m3t_good_streak >= int(self.params.owned_confirm_frames):
-                self.state = M3T_OWNED
-                self._suspect_since_ns = None
-                return self._decision(self.state, "m3t ownership confirmed", kind, is_new, now)
-            return self._decision(self.state, "waiting for m3t ownership", kind, is_new, now)
+                self._enter_owned()
+                return self._decision(
+                    observation, self.state, "m3t ownership confirmed", kind, is_new, now
+                )
+            return self._decision(
+                observation, self.state, "waiting for m3t ownership", kind, is_new, now
+            )
 
         if self.state == M3T_OWNED:
             lost_support = not self._fresh_tracking(observation) or (
@@ -197,17 +203,30 @@ class TrackingStateFilter:
             )
             if lost_support:
                 self._enter_suspect(now)
-                return self._decision(self.state, "positive support lost", kind, is_new, now)
-            return self._decision(self.state, "m3t-owned", kind, is_new, now)
+                return self._decision(
+                    observation, self.state, "positive support lost", kind, is_new, now
+                )
+            return self._decision(observation, self.state, "m3t-owned", kind, is_new, now)
 
         if self.state == M3T_SUSPECT:
             if self.m3t_good_streak >= int(self.params.recover_frames):
-                self.state = M3T_OWNED
-                self._suspect_since_ns = None
-                return self._decision(self.state, "m3t recovered", kind, is_new, now)
-            return self._decision(self.state, "m3t suspect", kind, is_new, now)
+                self._enter_owned()
+                return self._decision(
+                    observation, self.state, "m3t recovered", kind, is_new, now
+                )
+            return self._decision(observation, self.state, "m3t suspect", kind, is_new, now)
 
-        return self._decision(self.state, f"no transition from {self.state}", kind, is_new, now)
+        return self._decision(
+            observation, self.state, f"no transition from {self.state}", kind, is_new, now
+        )
+
+    def _enter_owned(self):
+        self.state = M3T_OWNED
+        self._suspect_since_ns = None
+        if not self._has_been_owned:
+            # Do not carry over startup YOLO-absence time into the first OWNED window.
+            self._yolo_absent_since_ns = None
+        self._has_been_owned = True
 
     def _enter_suspect(self, now):
         self.state = M3T_SUSPECT
@@ -217,7 +236,9 @@ class TrackingStateFilter:
         if self._suspect_since_ns is None:
             self._suspect_since_ns = now
 
-    def _expired_deadline(self, observation, now):
+    def _expired_deadline(self, observation, now, kind):
+        # Reinit is only requested while still starting. Once the target has
+        # been owned, a conflict or timeout drops to LOST instead.
         p = self.params
         if self.state == M3T_STARTING:
             if self._expired(self._startup_start_ns, now, p.startup_timeout_ms):
@@ -225,19 +246,31 @@ class TrackingStateFilter:
             if self._expired(self._conflict_since_ns, now, p.conflict_timeout_ms):
                 return REINIT_NEEDED, "external_conflict"
             return None
+        if self.state == M3T_OWNED:
+            if self._expired(self._yolo_absent_since_ns, now, p.absence_timeout_ms):
+                return LOST, "out_of_view"
+            return None
         if self.state != M3T_SUSPECT:
             return None
-        if self._expired(self._absence_since_ns, now, p.absence_timeout_ms):
+        if self._expired(self._absence_since_ns, now, p.absence_timeout_ms) or self._expired(
+            self._yolo_absent_since_ns, now, p.absence_timeout_ms
+        ):
             return LOST, "out_of_view"
-        if self._expired(self._no_target_since_ns, now, p.no_target_support_timeout_ms):
-            return LOST, self._no_target_reason
-        if self._expired(self._conflict_since_ns, now, p.conflict_timeout_ms):
-            return REINIT_NEEDED, "external_conflict"
         if self._expired(self._suspect_since_ns, now, p.suspect_timeout_ms):
-            if observation.yolo_observation_valid and observation.yolo_visible:
-                return REINIT_NEEDED, "support_timeout"
-            return LOST, "support_timeout"
+            return LOST, self._suspect_timeout_reason(kind)
         return None
+
+    @staticmethod
+    def _suspect_timeout_reason(kind):
+        if kind == EVIDENCE_ABSENCE:
+            return "out_of_view"
+        if kind == EVIDENCE_UNKNOWN:
+            return "observation_unavailable"
+        return "support_timeout"
+
+    @staticmethod
+    def _yolo_absent(observation):
+        return bool(observation.yolo_observation_valid and not observation.yolo_visible)
 
     def _apply_sample(self, observation, now, is_new, kind):
         # Duplicate and backward samples change no counter or timer.
@@ -269,16 +302,11 @@ class TrackingStateFilter:
         self._absence_since_ns = self._since(
             kind == EVIDENCE_ABSENCE, self._absence_since_ns, now
         )
-        # With no usable YOLO target, weak or unknown evidence gets a short
-        # deadline. A visible target uses the suspect deadline instead.
-        no_target = kind in (EVIDENCE_WEAK, EVIDENCE_UNKNOWN) and not (
-            observation.yolo_observation_valid and observation.yolo_visible
+        self._yolo_absent_since_ns = self._since(
+            self._has_been_owned and self._yolo_absent(observation),
+            self._yolo_absent_since_ns,
+            now,
         )
-        if no_target and self._no_target_since_ns is None:
-            self._no_target_reason = (
-                "observation_unavailable" if kind == EVIDENCE_UNKNOWN else "support_timeout"
-            )
-        self._no_target_since_ns = self._since(no_target, self._no_target_since_ns, now)
         self._update_scores(observation, kind)
 
     @staticmethod
@@ -386,10 +414,18 @@ class TrackingStateFilter:
         else:
             self.tracker_health_score = self._clamp(self.tracker_health_score - 0.03)
 
-    def _decision(self, state, reason, kind, is_new, now_ns):
+    def _decision(self, observation, state, reason, kind, is_new, now_ns):
         suspect_elapsed_ms = 0.0
         if self._suspect_since_ns is not None:
             suspect_elapsed_ms = max(0.0, (now_ns - self._suspect_since_ns) / _NS_PER_MS)
+        p = self.params
+        absence_confirmed = bool(
+            state == LOST
+            and (
+                self._expired(self._absence_since_ns, now_ns, p.absence_timeout_ms)
+                or self._expired(self._yolo_absent_since_ns, now_ns, p.absence_timeout_ms)
+            )
+        )
         return TrackingStateDecision(
             reliability_state=state,
             publish_trusted_pose=state == M3T_OWNED,
@@ -410,6 +446,8 @@ class TrackingStateFilter:
             suspect_elapsed_ms=float(suspect_elapsed_ms),
             evidence_kind=kind,
             observation_is_new=bool(is_new),
+            has_been_owned=bool(self._has_been_owned),
+            absence_confirmed=absence_confirmed,
         )
 
     @staticmethod
