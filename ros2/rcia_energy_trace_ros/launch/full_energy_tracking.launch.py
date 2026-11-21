@@ -201,6 +201,13 @@ def generate_launch_description():
     record_fps = LaunchConfiguration("record_fps")
     frame_history_size = LaunchConfiguration("frame_history_size")
     start_frame_tolerance_ms = LaunchConfiguration("start_frame_tolerance_ms")
+    rgbd_pair_tolerance_ms = LaunchConfiguration("rgbd_pair_tolerance_ms")
+    start_frame_wait_ms = LaunchConfiguration("start_frame_wait_ms")
+    replay_timeout_ms = LaunchConfiguration("replay_timeout_ms")
+    replay_target_lag_ms = LaunchConfiguration("replay_target_lag_ms")
+    max_frame_gap_ms = LaunchConfiguration("max_frame_gap_ms")
+    max_output_pose_age_ms = LaunchConfiguration("max_output_pose_age_ms")
+    live_frame_wait_ms = LaunchConfiguration("live_frame_wait_ms")
     yolo_topic = LaunchConfiguration("yolo_topic")
     mask_topic = LaunchConfiguration("mask_topic")
     foundationpose_topic = LaunchConfiguration("foundationpose_topic")
@@ -329,7 +336,14 @@ def generate_launch_description():
         DeclareLaunchArgument("record_fps", default_value="0.0"),
         DeclareLaunchArgument("show_foundationpose_windows", default_value="false"),
         DeclareLaunchArgument("frame_history_size", default_value="300"),
-        DeclareLaunchArgument("start_frame_tolerance_ms", default_value="80.0"),
+        DeclareLaunchArgument("start_frame_tolerance_ms", default_value="10.0"),
+        DeclareLaunchArgument("rgbd_pair_tolerance_ms", default_value="10.0"),
+        DeclareLaunchArgument("start_frame_wait_ms", default_value="1000.0"),
+        DeclareLaunchArgument("replay_timeout_ms", default_value="2000.0"),
+        DeclareLaunchArgument("replay_target_lag_ms", default_value="75.0"),
+        DeclareLaunchArgument("max_frame_gap_ms", default_value="100.0"),
+        DeclareLaunchArgument("max_output_pose_age_ms", default_value="250.0"),
+        DeclareLaunchArgument("live_frame_wait_ms", default_value="500.0"),
         DeclareLaunchArgument("est_refine_iter", default_value="3"),
         DeclareLaunchArgument("device", default_value="cpu"),
         DeclareLaunchArgument("render_backend", default_value="moderngl"),
@@ -403,6 +417,17 @@ def generate_launch_description():
                     start_frame_tolerance_ms,
                     value_type=float,
                 ),
+                "rgbd_pair_tolerance_ms": ParameterValue(
+                    rgbd_pair_tolerance_ms, value_type=float
+                ),
+                "start_frame_wait_ms": ParameterValue(start_frame_wait_ms, value_type=float),
+                "replay_timeout_ms": ParameterValue(replay_timeout_ms, value_type=float),
+                "replay_target_lag_ms": ParameterValue(replay_target_lag_ms, value_type=float),
+                "max_frame_gap_ms": ParameterValue(max_frame_gap_ms, value_type=float),
+                "max_output_pose_age_ms": ParameterValue(
+                    max_output_pose_age_ms, value_type=float
+                ),
+                "live_frame_wait_ms": ParameterValue(live_frame_wait_ms, value_type=float),
             }],
         ),
         Node(
