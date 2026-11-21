@@ -9,33 +9,20 @@ namespace rcia_energy_trace_ros {
 
 namespace {
 
+constexpr std::int64_t kTimeResetThresholdNs = 100000000LL;
+
 std::int64_t StampToNanoseconds(const builtin_interfaces::msg::Time &stamp) {
   return static_cast<std::int64_t>(stamp.sec) * 1000000000LL +
          static_cast<std::int64_t>(stamp.nanosec);
 }
 
 template <typename Frame>
-std::optional<Frame> FindNearestFrame(const std::deque<Frame> &frames,
-                                      std::int64_t target_ns,
-                                      std::int64_t tolerance_ns) {
-  std::optional<Frame> best_frame;
-  std::int64_t best_delta = std::numeric_limits<std::int64_t>::max();
-  for (const auto &frame : frames) {
-    const auto delta =
-        frame.stamp_ns > target_ns ? frame.stamp_ns - target_ns
-                                   : target_ns - frame.stamp_ns;
-    if (delta < best_delta) {
-      best_delta = delta;
-      best_frame = frame;
-    }
-  }
-  if (!best_frame || best_delta > tolerance_ns) return std::nullopt;
-  return best_frame;
-}
-
-template <typename Frame>
 void PruneHistory(std::deque<Frame> *frames, std::size_t max_history_size) {
   while (frames->size() > max_history_size) frames->pop_front();
+}
+
+std::int64_t AbsDiff(std::int64_t lhs, std::int64_t rhs) {
+  return lhs > rhs ? lhs - rhs : rhs - lhs;
 }
 
 }  // namespace
@@ -52,50 +39,70 @@ m3t::Intrinsics RosFrameBuffer::ToIntrinsics(
   return intrinsics;
 }
 
+bool RosFrameBuffer::SameIntrinsics(const m3t::Intrinsics &lhs,
+                                    const m3t::Intrinsics &rhs) {
+  return lhs.fu == rhs.fu && lhs.fv == rhs.fv && lhs.ppu == rhs.ppu &&
+         lhs.ppv == rhs.ppv && lhs.width == rhs.width &&
+         lhs.height == rhs.height;
+}
+
 void RosFrameBuffer::SetColorCameraInfo(
     const sensor_msgs::msg::CameraInfo &msg) {
+  const auto intrinsics = ToIntrinsics(msg);
   const std::lock_guard<std::mutex> lock{mutex_};
-  color_intrinsics_ = ToIntrinsics(msg);
+  const bool changed =
+      color_intrinsics_ && !SameIntrinsics(*color_intrinsics_, intrinsics);
+  color_intrinsics_ = intrinsics;
+  if (changed) ChangeCalibrationLocked();
 }
 
 void RosFrameBuffer::SetDepthCameraInfo(
     const sensor_msgs::msg::CameraInfo &msg) {
+  const auto intrinsics = ToIntrinsics(msg);
   const std::lock_guard<std::mutex> lock{mutex_};
-  depth_intrinsics_ = ToIntrinsics(msg);
+  const bool changed =
+      depth_intrinsics_ && !SameIntrinsics(*depth_intrinsics_, intrinsics);
+  depth_intrinsics_ = intrinsics;
+  if (changed) ChangeCalibrationLocked();
 }
 
 void RosFrameBuffer::SetColorImage(
     const sensor_msgs::msg::Image::ConstSharedPtr &msg) {
   cv_bridge::CvImageConstPtr cv_ptr =
       cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
+  const auto stamp_ns = StampToNanoseconds(msg->header.stamp);
   const std::lock_guard<std::mutex> lock{mutex_};
-  cv_ptr->image.copyTo(color_image_);
-  color_history_.push_back(
-      StampedColorFrame{StampToNanoseconds(msg->header.stamp), color_image_.clone()});
+  if (!color_history_.empty() && stamp_ns <= color_history_.back().stamp_ns) {
+    const auto backward_ns = color_history_.back().stamp_ns - stamp_ns;
+    if (backward_ns <= kTimeResetThresholdNs) return;
+    ResetTimelineLocked();
+  }
+  color_history_.push_back(StampedColorFrame{stamp_ns, cv_ptr->image.clone()});
   PruneHistory(&color_history_, max_history_size_);
+  NotifyLocked();
 }
 
 void RosFrameBuffer::SetDepthImage(
     const sensor_msgs::msg::Image::ConstSharedPtr &msg) {
   cv_bridge::CvImageConstPtr cv_ptr = cv_bridge::toCvShare(msg);
-  const std::lock_guard<std::mutex> lock{mutex_};
+  const auto stamp_ns = StampToNanoseconds(msg->header.stamp);
+  cv::Mat depth;
   if (cv_ptr->image.type() == CV_32FC1) {
-    cv::Mat meters;
-    cv_ptr->image.convertTo(meters, CV_16UC1, 1000.0);
-    meters.copyTo(depth_image_);
-    depth_scale_ = 0.001f;
+    cv_ptr->image.convertTo(depth, CV_16UC1, 1000.0);
   } else if (cv_ptr->image.type() == CV_16UC1) {
-    cv_ptr->image.copyTo(depth_image_);
-    depth_scale_ = 0.001f;
+    depth = cv_ptr->image.clone();
   } else {
-    cv::Mat converted;
-    cv_ptr->image.convertTo(converted, CV_16UC1);
-    converted.copyTo(depth_image_);
-    depth_scale_ = 0.001f;
+    cv_ptr->image.convertTo(depth, CV_16UC1);
   }
-  depth_history_.push_back(StampedDepthFrame{StampToNanoseconds(msg->header.stamp),
-                                             depth_image_.clone(), depth_scale_});
+  const std::lock_guard<std::mutex> lock{mutex_};
+  if (!depth_history_.empty() && stamp_ns <= depth_history_.back().stamp_ns) {
+    const auto backward_ns = depth_history_.back().stamp_ns - stamp_ns;
+    if (backward_ns <= kTimeResetThresholdNs) return;
+    ResetTimelineLocked();
+  }
+  depth_history_.push_back(StampedDepthFrame{stamp_ns, depth.clone(), 0.001f});
   PruneHistory(&depth_history_, max_history_size_);
+  NotifyLocked();
 }
 
 void RosFrameBuffer::SetMaxHistorySize(std::size_t max_history_size) {
@@ -110,30 +117,216 @@ void RosFrameBuffer::SetStartFrameTolerance(std::chrono::nanoseconds tolerance) 
   start_frame_tolerance_ = std::max(std::chrono::nanoseconds{0}, tolerance);
 }
 
-bool RosFrameBuffer::PinStartFrame(const builtin_interfaces::msg::Time &stamp) {
+void RosFrameBuffer::SetPairTolerance(std::chrono::nanoseconds tolerance) {
   const std::lock_guard<std::mutex> lock{mutex_};
-  if (!color_intrinsics_ || !depth_intrinsics_) return false;
-  const auto target_ns = StampToNanoseconds(stamp);
-  const auto tolerance_ns = start_frame_tolerance_.count();
-  auto color = FindNearestFrame(color_history_, target_ns, tolerance_ns);
-  auto depth = FindNearestFrame(depth_history_, target_ns, tolerance_ns);
-  if (!color || !depth) return false;
-
-  pinned_color_ = StampedColorFrame{color->stamp_ns, color->image.clone()};
-  pinned_depth_ =
-      StampedDepthFrame{depth->stamp_ns, depth->image.clone(), depth->depth_scale};
-  return true;
+  pair_tolerance_ = std::max(std::chrono::nanoseconds{0}, tolerance);
 }
 
-bool RosFrameBuffer::HasPinnedStartFrame() const {
+void RosFrameBuffer::SetMaxFrameGap(std::chrono::nanoseconds max_gap) {
   const std::lock_guard<std::mutex> lock{mutex_};
-  return pinned_color_.has_value() && pinned_depth_.has_value();
+  max_frame_gap_ = std::max(std::chrono::nanoseconds{0}, max_gap);
 }
 
-void RosFrameBuffer::ReleasePinnedStartFrame() {
+void RosFrameBuffer::SetRequireActivePair(bool require_active_pair) {
   const std::lock_guard<std::mutex> lock{mutex_};
-  pinned_color_.reset();
-  pinned_depth_.reset();
+  require_active_pair_ = require_active_pair;
+}
+
+FrameSelection RosFrameBuffer::BaseSelectionLocked() const {
+  FrameSelection selection;
+  selection.timeline_epoch = timeline_epoch_;
+  selection.calibration_epoch = calibration_epoch_;
+  return selection;
+}
+
+bool RosFrameBuffer::HasIntrinsicsLocked() const {
+  return color_intrinsics_.has_value() && depth_intrinsics_.has_value();
+}
+
+const RosFrameBuffer::StampedDepthFrame *RosFrameBuffer::FindDepthLocked(
+    std::int64_t color_ns, std::int64_t after_depth_ns) const {
+  const auto tolerance_ns = pair_tolerance_.count();
+  const auto first = std::lower_bound(
+      depth_history_.begin(), depth_history_.end(), color_ns - tolerance_ns,
+      [](const StampedDepthFrame &frame, std::int64_t value) {
+        return frame.stamp_ns < value;
+      });
+  const StampedDepthFrame *best = nullptr;
+  std::int64_t best_delta = std::numeric_limits<std::int64_t>::max();
+  for (auto it = first;
+       it != depth_history_.end() && it->stamp_ns <= color_ns + tolerance_ns;
+       ++it) {
+    if (it->stamp_ns <= after_depth_ns) continue;
+    const auto delta = AbsDiff(it->stamp_ns, color_ns);
+    if (delta < best_delta) {
+      best_delta = delta;
+      best = &(*it);
+    }
+  }
+  return best;
+}
+
+std::shared_ptr<const FramePair> RosFrameBuffer::MakePairLocked(
+    const StampedColorFrame &color, const StampedDepthFrame &depth) const {
+  auto pair = std::make_shared<FramePair>();
+  pair->color_stamp_ns = color.stamp_ns;
+  pair->depth_stamp_ns = depth.stamp_ns;
+  pair->color = color.image;
+  pair->depth = depth.image;
+  pair->color_intrinsics = *color_intrinsics_;
+  pair->depth_intrinsics = *depth_intrinsics_;
+  pair->depth_scale = depth.depth_scale;
+  return pair;
+}
+
+void RosFrameBuffer::ClearHistoriesLocked() {
+  color_history_.clear();
+  depth_history_.clear();
+}
+
+void RosFrameBuffer::ResetTimelineLocked() {
+  ++timeline_epoch_;
+  ClearHistoriesLocked();
+  NotifyLocked();
+}
+
+void RosFrameBuffer::ChangeCalibrationLocked() {
+  ++calibration_epoch_;
+  ClearHistoriesLocked();
+  NotifyLocked();
+}
+
+void RosFrameBuffer::NotifyLocked() {
+  ++frame_version_;
+  cv_.notify_all();
+}
+
+FrameSelection RosFrameBuffer::SelectStartPair(std::int64_t target_ns) const {
+  const std::lock_guard<std::mutex> lock{mutex_};
+  FrameSelection selection = BaseSelectionLocked();
+  if (!HasIntrinsicsLocked() || color_history_.empty()) return selection;
+
+  const auto start_tolerance_ns = start_frame_tolerance_.count();
+  const StampedColorFrame *best_color = nullptr;
+  const StampedDepthFrame *best_depth = nullptr;
+  std::int64_t best_delta = std::numeric_limits<std::int64_t>::max();
+  const StampedColorFrame *latest_in_window = nullptr;
+  for (const auto &color : color_history_) {
+    if (color.stamp_ns < target_ns - start_tolerance_ns) continue;
+    if (color.stamp_ns > target_ns + start_tolerance_ns) break;
+    latest_in_window = &color;
+    const auto *depth = FindDepthLocked(color.stamp_ns, std::numeric_limits<std::int64_t>::min());
+    if (!depth) continue;
+    const auto delta = AbsDiff(color.stamp_ns, target_ns);
+    if (delta < best_delta) {
+      best_delta = delta;
+      best_color = &color;
+      best_depth = depth;
+    }
+  }
+
+  if (best_color) {
+    selection.code = FrameSelectCode::Ready;
+    selection.pair = MakePairLocked(*best_color, *best_depth);
+    return selection;
+  }
+
+  if (latest_in_window) {
+    // Only give up early if the depth stream has already moved past every
+    // possible depth that could pair with any color in [target - tol, target + tol].
+    const bool depth_passed =
+        !depth_history_.empty() &&
+        depth_history_.back().stamp_ns >
+            target_ns + start_tolerance_ns + pair_tolerance_.count();
+    selection.code =
+        depth_passed ? FrameSelectCode::HistoryExpired : FrameSelectCode::Waiting;
+    return selection;
+  }
+
+  // No color frame in the window: either the target has not arrived yet or the
+  // color stream already skipped over it.
+  if (color_history_.back().stamp_ns > target_ns + start_tolerance_ns) {
+    selection.code = FrameSelectCode::HistoryExpired;
+  }
+  return selection;
+}
+
+FrameSelection RosFrameBuffer::SelectNextPair(
+    std::int64_t after_color_ns, std::int64_t after_depth_ns,
+    std::uint64_t expected_timeline_epoch,
+    std::uint64_t expected_calibration_epoch) const {
+  const std::lock_guard<std::mutex> lock{mutex_};
+  FrameSelection selection = BaseSelectionLocked();
+  if (expected_timeline_epoch != timeline_epoch_) {
+    selection.code = FrameSelectCode::TimeReset;
+    return selection;
+  }
+  if (expected_calibration_epoch != calibration_epoch_) {
+    selection.code = FrameSelectCode::CameraChanged;
+    return selection;
+  }
+  if (!HasIntrinsicsLocked()) return selection;
+
+  std::size_t skipped = 0;
+  for (const auto &color : color_history_) {
+    if (color.stamp_ns <= after_color_ns) continue;
+    const auto *depth = FindDepthLocked(color.stamp_ns, after_depth_ns);
+    if (!depth) {
+      ++skipped;
+      continue;
+    }
+    selection.pair = MakePairLocked(color, *depth);
+    selection.skipped_color_frames = skipped;
+    selection.code = color.stamp_ns - after_color_ns > max_frame_gap_.count()
+                         ? FrameSelectCode::GapTooLarge
+                         : FrameSelectCode::Ready;
+    return selection;
+  }
+  return selection;
+}
+
+FrameSelection RosFrameBuffer::SelectLatestPair(
+    std::int64_t after_color_ns, std::int64_t after_depth_ns,
+    std::uint64_t expected_timeline_epoch,
+    std::uint64_t expected_calibration_epoch) const {
+  const std::lock_guard<std::mutex> lock{mutex_};
+  FrameSelection selection = BaseSelectionLocked();
+  if (expected_timeline_epoch != timeline_epoch_) {
+    selection.code = FrameSelectCode::TimeReset;
+    return selection;
+  }
+  if (expected_calibration_epoch != calibration_epoch_) {
+    selection.code = FrameSelectCode::CameraChanged;
+    return selection;
+  }
+  if (!HasIntrinsicsLocked()) return selection;
+
+  for (auto it = color_history_.rbegin(); it != color_history_.rend(); ++it) {
+    if (it->stamp_ns <= after_color_ns) break;
+    const auto *depth = FindDepthLocked(it->stamp_ns, after_depth_ns);
+    if (!depth) continue;
+    selection.pair = MakePairLocked(*it, *depth);
+    selection.code = it->stamp_ns - after_color_ns > max_frame_gap_.count()
+                         ? FrameSelectCode::GapTooLarge
+                         : FrameSelectCode::Ready;
+    return selection;
+  }
+  return selection;
+}
+
+void RosFrameBuffer::ActivatePair(const std::shared_ptr<const FramePair> &pair) {
+  const std::lock_guard<std::mutex> lock{mutex_};
+  active_pair_ = pair;
+}
+
+std::shared_ptr<const FramePair> RosFrameBuffer::ActivePair() const {
+  const std::lock_guard<std::mutex> lock{mutex_};
+  return active_pair_;
+}
+
+void RosFrameBuffer::ClearActivePair() {
+  const std::lock_guard<std::mutex> lock{mutex_};
+  active_pair_.reset();
 }
 
 std::optional<std::int64_t> RosFrameBuffer::LatestColorStampNs() const {
@@ -148,28 +341,47 @@ std::optional<std::int64_t> RosFrameBuffer::LatestDepthStampNs() const {
   return depth_history_.back().stamp_ns;
 }
 
-std::optional<std::int64_t> RosFrameBuffer::PinnedColorStampNs() const {
+std::optional<std::int64_t> RosFrameBuffer::LatestCompleteColorStampNs() const {
   const std::lock_guard<std::mutex> lock{mutex_};
-  if (!pinned_color_) return std::nullopt;
-  return pinned_color_->stamp_ns;
+  for (auto it = color_history_.rbegin(); it != color_history_.rend(); ++it) {
+    if (FindDepthLocked(it->stamp_ns, std::numeric_limits<std::int64_t>::min())) {
+      return it->stamp_ns;
+    }
+  }
+  return std::nullopt;
 }
 
-std::optional<std::int64_t> RosFrameBuffer::PinnedDepthStampNs() const {
+void RosFrameBuffer::ResetHistory() {
   const std::lock_guard<std::mutex> lock{mutex_};
-  if (!pinned_depth_) return std::nullopt;
-  return pinned_depth_->stamp_ns;
+  ClearHistoriesLocked();
+}
+
+bool RosFrameBuffer::WaitForFrames(std::chrono::milliseconds timeout,
+                                   const std::atomic<bool> &cancelled) {
+  std::unique_lock<std::mutex> lock{mutex_};
+  const auto start_version = frame_version_;
+  cv_.wait_for(lock, timeout, [&]() {
+    return cancelled.load() || frame_version_ != start_version;
+  });
+  return frame_version_ != start_version;
+}
+
+void RosFrameBuffer::WakeWaiters() {
+  const std::lock_guard<std::mutex> lock{mutex_};
+  cv_.notify_all();
 }
 
 bool RosFrameBuffer::CopyColor(cv::Mat *image,
                                m3t::Intrinsics *intrinsics) const {
   const std::lock_guard<std::mutex> lock{mutex_};
-  if (!color_intrinsics_) return false;
-  if (pinned_color_) {
-    pinned_color_->image.copyTo(*image);
-  } else {
-    if (color_image_.empty()) return false;
-    color_image_.copyTo(*image);
+  if (active_pair_) {
+    active_pair_->color.copyTo(*image);
+    *intrinsics = active_pair_->color_intrinsics;
+    return !image->empty();
   }
+  if (require_active_pair_) return false;
+  if (!color_intrinsics_ || color_history_.empty()) return false;
+  color_history_.back().image.copyTo(*image);
   *intrinsics = *color_intrinsics_;
   return true;
 }
@@ -177,27 +389,28 @@ bool RosFrameBuffer::CopyColor(cv::Mat *image,
 bool RosFrameBuffer::CopyDepth(cv::Mat *image, m3t::Intrinsics *intrinsics,
                                float *depth_scale) const {
   const std::lock_guard<std::mutex> lock{mutex_};
-  if (!depth_intrinsics_) return false;
-  if (pinned_depth_) {
-    pinned_depth_->image.copyTo(*image);
-    *depth_scale = pinned_depth_->depth_scale;
-  } else {
-    if (depth_image_.empty()) return false;
-    depth_image_.copyTo(*image);
-    *depth_scale = depth_scale_;
+  if (active_pair_) {
+    active_pair_->depth.copyTo(*image);
+    *intrinsics = active_pair_->depth_intrinsics;
+    *depth_scale = active_pair_->depth_scale;
+    return !image->empty();
   }
+  if (require_active_pair_) return false;
+  if (!depth_intrinsics_ || depth_history_.empty()) return false;
+  depth_history_.back().image.copyTo(*image);
   *intrinsics = *depth_intrinsics_;
+  *depth_scale = depth_history_.back().depth_scale;
   return true;
 }
 
 bool RosFrameBuffer::HasColor() const {
   const std::lock_guard<std::mutex> lock{mutex_};
-  return !color_image_.empty() && color_intrinsics_.has_value();
+  return !color_history_.empty() && color_intrinsics_.has_value();
 }
 
 bool RosFrameBuffer::HasDepth() const {
   const std::lock_guard<std::mutex> lock{mutex_};
-  return !depth_image_.empty() && depth_intrinsics_.has_value();
+  return !depth_history_.empty() && depth_intrinsics_.has_value();
 }
 
 RosColorCamera::RosColorCamera(const std::string &name,
