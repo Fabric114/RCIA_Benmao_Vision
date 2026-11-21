@@ -87,6 +87,8 @@ def _foundationpose_cmd():
     symmetry_mode = LaunchConfiguration("symmetry_mode")
     canonicalize_yaw = LaunchConfiguration("canonicalize_yaw")
     yaw_fallback_deg = LaunchConfiguration("yaw_fallback_deg")
+    zone_disambiguation_enabled = LaunchConfiguration("zone_disambiguation_enabled")
+    zone_disambiguation_radius_m = LaunchConfiguration("zone_disambiguation_radius_m")
 
     return [
         "eval \"$(conda shell.bash hook)\" && "
@@ -164,6 +166,10 @@ def _foundationpose_cmd():
         canonicalize_yaw,
         " -p yaw_fallback_deg:=",
         yaw_fallback_deg,
+        " -p zone_disambiguation_enabled:=",
+        zone_disambiguation_enabled,
+        " -p zone_disambiguation_radius_m:=",
+        zone_disambiguation_radius_m,
     ]
 
 
@@ -356,6 +362,8 @@ def generate_launch_description():
         DeclareLaunchArgument("symmetry_mode", default_value="z12"),
         DeclareLaunchArgument("canonicalize_yaw", default_value="true"),
         DeclareLaunchArgument("yaw_fallback_deg", default_value="15.0"),
+        DeclareLaunchArgument("zone_disambiguation_enabled", default_value="false"),
+        DeclareLaunchArgument("zone_disambiguation_radius_m", default_value="0.14"),
         DeclareLaunchArgument("filter_absence_timeout_ms", default_value="750.0"),
         DeclareLaunchArgument("filter_conflict_timeout_ms", default_value="625.0"),
         DeclareLaunchArgument("filter_suspect_timeout_ms", default_value="1000.0"),

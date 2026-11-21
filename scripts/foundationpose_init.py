@@ -22,6 +22,7 @@ from estimater import *
 from datareader import *
 import argparse
 from scripts.yaw_canonicalization import YawCanonicalizer, canonicalize_yaw, mesh_center_from_vertices
+from scripts.pose_end_disambiguation import disambiguate_zone_pose, mesh_endpoints_from_vertices
 from scripts.bbox_depth_mask import bbox_depth_mask
 try:
     from auto_register import AutoRegisterGate
@@ -130,6 +131,20 @@ def read_frame_pair(rgb_file, depth_file):
     return color, depth
 
 
+def zone_disambiguate(est, pose, depth, K, endpoints, radius_m):
+    """按端点区域点数消歧注册位姿；翻转时同步 est.pose_last，供后续 track_one 使用"""
+    model_center, large_tip, small_tip = endpoints
+    res = disambiguate_zone_pose(pose=pose, depth_m=depth, K=K, model_center=model_center,
+                                 large_tip=large_tip, small_tip=small_tip, radius_m=radius_m)
+    if res.flipped:
+        logging.info(f'端点区域消歧: 位姿已翻转 (n_large={res.n_large}, n_small={res.n_small}, radius_m={radius_m})')
+        last = getattr(est, 'pose_last', None)
+        if last is not None:
+            est.pose_last = (_torch.as_tensor(res.pose, dtype=last.dtype, device=last.device)
+                             @ _torch.linalg.inv(est.get_tf_to_centered_mesh()))
+    return res.pose
+
+
 def run_offline(args, est, mesh, to_origin, bbox_vis, K):
     """离线模式：处理磁盘上保存的帧"""
     mask_gen = MaskGenerator(
@@ -140,6 +155,7 @@ def run_offline(args, est, mesh, to_origin, bbox_vis, K):
     )
     rgb_files, depth_files = read_frames_from_dir(args.data_dir)
     yaw = None if args.no_canonicalize_yaw else YawCanonicalizer(mesh_center_from_vertices(mesh.vertices))
+    endpoints = mesh_endpoints_from_vertices(mesh.vertices) if args.zone_disambiguation_enabled else None
 
     for i in range(len(rgb_files)):
         logging.info(f'帧 {i}/{len(rgb_files)}: {rgb_files[i]}')
@@ -155,6 +171,8 @@ def run_offline(args, est, mesh, to_origin, bbox_vis, K):
                 logging.info(f'检测框: {bbox}, 遮罩面积: {mask.sum()}')
             pose = est.register(K=K, rgb=color, depth=depth, ob_mask=mask,
                               iteration=args.est_refine_iter, bbox_xyxy=bbox)
+            if endpoints is not None:
+                pose = zone_disambiguate(est, pose, depth, K, endpoints, args.zone_disambiguation_radius_m)
             if yaw is not None:
                 pose = canonicalize_yaw(pose, yaw.model_center, yaw.fallback_deg)
             pose_output = Path(args.pose_output)
@@ -189,6 +207,7 @@ def run_live(args, est, mesh, to_origin, bbox_vis, K):
     import pyrealsense2 as rs
 
     yaw = None if args.no_canonicalize_yaw else YawCanonicalizer(mesh_center_from_vertices(mesh.vertices))
+    endpoints = mesh_endpoints_from_vertices(mesh.vertices) if args.zone_disambiguation_enabled else None
 
     mask_gen = MaskGenerator(
         yolo_path=args.yolo_model,
@@ -301,6 +320,8 @@ def run_live(args, est, mesh, to_origin, bbox_vis, K):
                     logging.info(f'检测框: {bbox}, 遮罩面积: {mask.sum()}')
                 pose = est.register(K=K, rgb=color, depth=depth, ob_mask=mask,
                                   iteration=args.est_refine_iter, bbox_xyxy=bbox)
+                if endpoints is not None:
+                    pose = zone_disambiguate(est, pose, depth, K, endpoints, args.zone_disambiguation_radius_m)
                 if yaw is not None:
                     yaw.reset()
                     pose = yaw.apply(pose)
@@ -402,6 +423,10 @@ if __name__ == '__main__':
     parser.add_argument('--ov_cache_dir', type=str, default='',
                         help='OpenVINO 编译缓存目录，空字符串表示不启用')
     parser.add_argument('--no_canonicalize_yaw', action='store_true')
+    parser.add_argument('--zone_disambiguation_enabled', action='store_true',
+                        help='注册后用端点区域点数消歧，修正位姿翻转')
+    parser.add_argument('--zone_disambiguation_radius_m', type=float, default=0.14,
+                        help='端点区域半径（米）')
     parser.add_argument('--track_refine_iter', type=int, default=2)
 
     # 调试

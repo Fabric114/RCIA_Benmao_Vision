@@ -8,6 +8,7 @@ from pathlib import Path
 import json
 import numpy as np
 import rclpy
+import torch
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
@@ -34,6 +35,10 @@ from scripts.diagnostic_visualization import (  # noqa: E402
 from scripts.foundationpose_candidate_policy import FoundationPoseCandidatePolicy  # noqa: E402
 from scripts.initial_pose_policy import InitialPosePublishPolicy  # noqa: E402
 from scripts.latest_rgbd_buffer import LatestRgbdBuffer  # noqa: E402
+from scripts.pose_end_disambiguation import (  # noqa: E402
+    disambiguate_zone_pose,
+    mesh_endpoints_from_vertices,
+)
 from scripts.ros_pose_utils import matrix_to_pose_components  # noqa: E402
 from scripts.ros_rgbd_sync import stamp_to_nanoseconds  # noqa: E402
 from scripts.timing_diagnostics import make_timing_event  # noqa: E402
@@ -107,6 +112,8 @@ class FoundationPoseInitNode(Node):
         self.declare_parameter("ov_cache_dir", "none")  # none/off/空字符串表示不启用 OpenVINO 编译缓存
         self.declare_parameter("canonicalize_yaw", True)
         self.declare_parameter("yaw_fallback_deg", 15.0)
+        self.declare_parameter("zone_disambiguation_enabled", False)
+        self.declare_parameter("zone_disambiguation_radius_m", 0.14)
         self.declare_parameter("sync_tolerance_ms", 5.0)
         self.declare_parameter("sync_queue_size", 60)
         self.declare_parameter("latest_frame_max_age_ms", 120.0)
@@ -139,6 +146,11 @@ class FoundationPoseInitNode(Node):
         )
         self.declare_parameter("pose_output", str(PROJECT_ROOT / "runtime/foundation_pose.txt"))
         self.declare_parameter("publish_once", True)
+        zone_radius_m = float(self.get_parameter("zone_disambiguation_radius_m").value)
+        if not np.isfinite(zone_radius_m) or zone_radius_m <= 0:
+            raise ValueError(
+                f"zone_disambiguation_radius_m must be finite and > 0, got {zone_radius_m}"
+            )
         self.color_frame_count = 0
         self.supervisor_active = False
         self.supervisor_remaining = 0
@@ -299,6 +311,9 @@ class FoundationPoseInitNode(Node):
         self.estimator_bundle = bundle
         self.to_origin = bundle.to_origin
         self.bbox_vis = bundle.bbox_vis
+        self.model_center, self.large_tip, self.small_tip = mesh_endpoints_from_vertices(
+            bundle.mesh.vertices
+        )
         return bundle.estimator
 
     def _canonicalize_pose(self, pose):
@@ -308,6 +323,14 @@ class FoundationPoseInitNode(Node):
             pose,
             self.estimator_bundle.model_center,
             float(self.get_parameter("yaw_fallback_deg").value),
+        )
+
+    def _sync_estimator_pose_last(self, world_pose):
+        last = self.estimator.pose_last
+        tf_to_center = self.estimator.get_tf_to_centered_mesh()
+        self.estimator.pose_last = (
+            torch.as_tensor(world_pose, dtype=last.dtype, device=last.device)
+            @ torch.linalg.inv(tf_to_center)
         )
 
     def _camera_info_cb(self, msg):
@@ -509,14 +532,41 @@ class FoundationPoseInitNode(Node):
             self.get_logger().warning("YOLO box has no valid depth near the object; skipping this frame")
             return
 
+        k_matrix = camera_info_to_matrix(camera_info)
         pose = self.estimator.register(
-            K=camera_info_to_matrix(camera_info),
+            K=k_matrix,
             rgb=color,
             depth=depth,
             ob_mask=mask,
             iteration=int(self.get_parameter("est_refine_iter").value),
             bbox_xyxy=bbox,
         )
+        zone_extra = {}
+        if bool(self.get_parameter("zone_disambiguation_enabled").value):
+            zone_radius_m = float(self.get_parameter("zone_disambiguation_radius_m").value)
+            zone_res = disambiguate_zone_pose(
+                pose=pose,
+                depth_m=depth,
+                K=k_matrix,
+                model_center=self.model_center,
+                large_tip=self.large_tip,
+                small_tip=self.small_tip,
+                radius_m=zone_radius_m,
+            )
+            pose = zone_res.pose
+            zone_extra = {
+                "zone_disambiguation_flipped": bool(zone_res.flipped),
+                "zone_n_large": int(zone_res.n_large),
+                "zone_n_small": int(zone_res.n_small),
+            }
+            if zone_res.flipped:
+                if getattr(self.estimator, "pose_last", None) is not None:
+                    self._sync_estimator_pose_last(pose)
+                self.get_logger().info(
+                    "Zone disambiguation flipped the FoundationPose pose: "
+                    f"n_large={zone_res.n_large}, n_small={zone_res.n_small}, "
+                    f"radius_m={zone_radius_m}"
+                )
         pose = self._canonicalize_pose(pose)
         self._publish_timing(
             "foundationpose_register_done",
@@ -525,6 +575,7 @@ class FoundationPoseInitNode(Node):
             extra={
                 "bbox": [] if bbox is None else [float(v) for v in bbox],
                 "mask_pixels": int(mask.sum()),
+                **zone_extra,
             },
         )
         register_age_ms = (self._now_ns() - color_stamp_ns) / 1_000_000.0

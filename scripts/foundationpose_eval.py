@@ -16,6 +16,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.bbox_depth_mask import bbox_depth_mask  # noqa: E402
 from scripts.pose_eval_metrics import pose_errors  # noqa: E402
+from scripts.pose_end_disambiguation import disambiguate_zone_pose, mesh_endpoints_from_vertices  # noqa: E402
 
 
 def list_frame_dirs(frames_root):
@@ -83,8 +84,15 @@ def cmd_run(args):
     cfg = EstimatorConfig(**{f.name: getattr(args, f.name, f.default) for f in fields(EstimatorConfig)})
     bundle = build_estimator(cfg)
     est = bundle.estimator
+    model_center, large_tip, small_tip = mesh_endpoints_from_vertices(bundle.mesh.vertices)
     results = {
-        "config": {**asdict(cfg), "mask_source": args.mask_source, "est_refine_iter": args.est_refine_iter},
+        "config": {
+            **asdict(cfg),
+            "mask_source": args.mask_source,
+            "est_refine_iter": args.est_refine_iter,
+            "zone_disambiguation_enabled": bool(args.zone_disambiguation_enabled),
+            "zone_disambiguation_radius_m": args.zone_disambiguation_radius_m,
+        },
         "frames": {},
     }
     for frame_dir in list_frame_dirs(args.frames_root):
@@ -112,11 +120,29 @@ def cmd_run(args):
         else:
             raise ValueError(f"unknown mask_source: {args.mask_source}")
         pose = est.register(K=K, rgb=rgb, depth=depth, ob_mask=mask, iteration=args.est_refine_iter, bbox_xyxy=bbox)
+        frame_result = {}
+        if args.zone_disambiguation_enabled:
+            zone_res = disambiguate_zone_pose(
+                pose=pose,
+                depth_m=depth,
+                K=K,
+                model_center=model_center,
+                large_tip=large_tip,
+                small_tip=small_tip,
+                radius_m=args.zone_disambiguation_radius_m,
+            )
+            pose = zone_res.pose
+            frame_result["zone_disambiguation"] = {
+                "flipped": bool(zone_res.flipped),
+                "n_large": int(zone_res.n_large),
+                "n_small": int(zone_res.n_small),
+            }
         timing = dict(est.last_timing_ms)
         timing["mask"] = mask_ms
         timing.update({f"refine_{k}": v for k, v in est.refiner.last_timing_ms.items()})
         timing.update({f"score_{k}": v for k, v in est.scorer.last_timing_ms.items()})
-        results["frames"][frame_dir.name] = {"pose": np.asarray(pose).tolist(), "timing_ms": timing}
+        frame_result.update({"pose": np.asarray(pose).tolist(), "timing_ms": timing})
+        results["frames"][frame_dir.name] = frame_result
         print(f"{frame_dir.name}: total={timing['total']:.1f} ms")
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -186,6 +212,8 @@ def build_parser():
     p.add_argument("--mesh_file", default=str(PROJECT_ROOT / "models/object/Str3D.obj"))
     p.add_argument("--debug", type=int, default=0)
     p.add_argument("--debug_dir", default=str(PROJECT_ROOT / "runtime/foundationpose_debug"))
+    p.add_argument("--zone_disambiguation_enabled", action="store_true")
+    p.add_argument("--zone_disambiguation_radius_m", type=float, default=0.14)
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("compare")
