@@ -91,7 +91,7 @@ class FoundationPoseInitNode(Node):
         self.declare_parameter("mesh_file", str(PROJECT_ROOT / "models/object/Str3D.obj"))
         self.declare_parameter("yolo_model", str(PROJECT_ROOT / "models/yolo/1117_openvino_model"))
         self.declare_parameter("mask_center_frac", 0.35)
-        self.declare_parameter("depth_window_half_m", 0.11)
+        self.declare_parameter("depth_window_half_m", 0.08)
         self.declare_parameter("target_class", -1)
         self.declare_parameter("detect_conf", 0.75)
         self.declare_parameter("register_conf", 0.75)

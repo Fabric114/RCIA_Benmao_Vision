@@ -174,7 +174,7 @@ def build_parser():
     p.add_argument("--out", required=True)
     p.add_argument("--mask_source", choices=["bbox_depth", "sam_file"], default="bbox_depth")
     p.add_argument("--mask_center_frac", type=float, default=0.35)
-    p.add_argument("--depth_window_half_m", type=float, default=0.11)
+    p.add_argument("--depth_window_half_m", type=float, default=0.08)
     p.add_argument("--est_refine_iter", type=int, default=5)
     p.add_argument("--symmetry_mode", choices=["none", "z12"], default="none")
     p.add_argument("--device", choices=["cuda", "cpu"], default="cuda")

@@ -20,7 +20,7 @@ from learning.ov_model import refine_ir_path, score_ir_path  # noqa: E402
 
 MESH_FILE = str(PROJECT_ROOT / "models/object/Str3D.obj")
 MASK_CENTER_FRAC = 0.35  # 与 foundationpose_eval.py run 的默认值一致
-DEPTH_WINDOW_HALF_M = 0.11
+DEPTH_WINDOW_HALF_M = 0.08
 
 
 class _RefineReservoir(list):
