@@ -2,9 +2,10 @@ import unittest
 
 import numpy as np
 
-from scripts.linemod_silhouette_renderer import render_model_buffers
+from scripts.linemod_silhouette_renderer import render_mask_and_depth, render_model_buffers
 from scripts.linemod_validator import (
     validate_black_white_appearance,
+    validate_pre_rendered_depth_consistency,
     validate_rendered_depth_consistency,
 )
 
@@ -125,6 +126,55 @@ class LinemodValidatorTest(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertLess(result.consistency_ratio, 0.70)
+
+    def test_pre_rendered_depth_consistency_matches_render_path(self):
+        vertices = np.array(
+            [
+                [-0.05, -0.05, 0.0],
+                [0.05, -0.05, 0.0],
+                [0.05, 0.05, 0.0],
+                [-0.05, 0.05, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+        observed_pose = np.eye(4, dtype=np.float64)
+        observed_pose[:3, 3] = [0.0, 0.0, 0.5]
+        k_matrix = np.array(
+            [[600.0, 0.0, 80.0], [0.0, 600.0, 60.0], [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        )
+        _, mask, _, observed_depth_m, _ = render_model_buffers(
+            vertices, faces, observed_pose, k_matrix, image_size=(160, 120)
+        )
+        observed_depth = np.zeros((120, 160), dtype=np.uint16)
+        observed_depth[mask > 0] = np.round(observed_depth_m[mask > 0] * 1000.0).astype(np.uint16)
+
+        for candidate_z in (0.5, 0.52, 0.58):
+            candidate_pose = observed_pose.copy()
+            candidate_pose[:3, 3] = [0.0, 0.0, candidate_z]
+            expected = validate_rendered_depth_consistency(
+                vertices,
+                faces,
+                candidate_pose,
+                k_matrix,
+                observed_depth,
+                image_size=(160, 120),
+                max_depth_residual_m=0.02,
+                min_consistency_ratio=0.70,
+            )
+            rendered_mask, rendered_depth = render_mask_and_depth(
+                vertices, faces, candidate_pose, k_matrix, image_size=(160, 120)
+            )
+            actual = validate_pre_rendered_depth_consistency(
+                rendered_mask,
+                rendered_depth,
+                observed_depth,
+                max_depth_residual_m=0.02,
+                min_consistency_ratio=0.70,
+            )
+
+            self.assertEqual(actual, expected)
 
 
 if __name__ == "__main__":

@@ -506,6 +506,149 @@ class TrackingSupervisorLifecycleIntegrationTest(unittest.TestCase):
         self.h.tick()
         self.assertEqual(self.node.init_request_pub.publish.call_count, requests_before + 1)
 
+    def test_no_track_does_not_render_leftover_pose(self):
+        self.h.feed_pose()
+        self.h.tick()
+
+        self.assertEqual(self.node.lifecycle.state, NO_TRACK)
+        self.h.evaluate.assert_not_called()
+        self.assertFalse(self._last_health()["m3t"]["health_evaluated"])
+        self.assertEqual(self._last_health()["m3t"]["reason"], "tracker not active")
+
+    def test_stop_pending_does_not_render_pose(self):
+        session_stamp = self.h.start_session()
+        self._own_target(session_stamp)
+        self.h.evaluate.reset_mock()
+        self.node.stop_in_flight = True
+        self.node.stop_sent_mono_ns = self.h.clock["mono"]
+        self.node.stop_sent_status_seq = self.node.m3t_status_seq
+
+        self.h.feed_pose()
+        self.h.tick()
+
+        self.assertEqual(self.node.lifecycle.state, TRACKING)
+        self.assertEqual(self._last_state()["action"], "wait_for_m3t_stop")
+        self.h.evaluate.assert_not_called()
+        self.assertFalse(self._last_health()["m3t"]["health_evaluated"])
+        self.assertEqual(self._last_health()["m3t"]["reason"], "tracker not active")
+
+    def test_stop_clears_pose_and_health_residue(self):
+        session_stamp = self.h.start_session()
+        self._own_target(session_stamp)
+        self.assertIsNotNone(self.node.previous_valid_m3t_pose)
+        self.h.evaluate.return_value = empty_background_health()
+
+        for _ in range(12):
+            self.h.feed_pose()
+            self.h.tick(yolo_detected=False)
+            if self.node.stop_pub.publish.called:
+                break
+
+        self.node.stop_pub.publish.assert_called_once()
+        self.assertIsNone(self.node.latest_m3t_pose)
+        self.assertIsNone(self.node.health_cache)
+        self.assertIsNone(self.node.previous_valid_m3t_pose)
+        self.assertEqual(self.node.last_pose_color_stamp_ns, 0)
+
+    def test_health_payload_reports_raw_yolo_visibility(self):
+        self.h.tick(yolo_detected=True)
+        self.assertTrue(self._last_health()["yolo_visible"])
+
+        self.h.tick(yolo_detected=False)
+        self.assertFalse(self._last_health()["yolo_visible"])
+
+    def _tick_with_detections(self, detections, ms=125):
+        self.h.advance(ms)
+        self.node._yolo_cb(json_msg({"stamp_ns": self.h.now_ns, "detections": detections}))
+        self.node._tick()
+
+    def test_multitarget_confidence_flip_keeps_tracking_owned_target(self):
+        top_box = [220.0, 80.0, 274.0, 156.0]
+        left_box = [113.0, 131.0, 202.0, 206.0]
+        det_top_best = [
+            {"class_id": 0, "confidence": 0.92, "bbox_xyxy": top_box},
+            {"class_id": 0, "confidence": 0.88, "bbox_xyxy": left_box},
+        ]
+        det_left_best = [
+            {"class_id": 0, "confidence": 0.88, "bbox_xyxy": top_box},
+            {"class_id": 0, "confidence": 0.95, "bbox_xyxy": left_box},
+        ]
+
+        for _ in range(self.node.lifecycle.params.stable_yolo_frames):
+            self._tick_with_detections(det_top_best)
+        request_id = self.node.active_request["request_id"]
+        self.assertEqual(self.node.active_request["bbox_xyxy"], top_box)
+        stamp = self.h.now_ns
+        self.node._candidate_pose_cb(pose_msg(stamp))
+        self.node._candidate_status_cb(json_msg({"request_id": request_id, "frame_stamp_ns": stamp}))
+        self._tick_with_detections(det_top_best)
+
+        self.h.status("tracking", initial_stamp=stamp)
+        for _ in range(3):
+            self.h.feed_pose()
+            self._tick_with_detections(det_top_best)
+        self.assertEqual(self.node.tracking_state_filter.state, M3T_OWNED)
+
+        # Neighbor target overtakes confidence; supervisor must still match top_box.
+        self.h.evaluate.reset_mock()
+        trusted_before = self.node.trusted_pose_pub.publish.call_count
+        for _ in range(4):
+            self.h.feed_pose()
+            self._tick_with_detections(det_left_best)
+
+        self.assertEqual(self.node.tracking_state_filter.state, M3T_OWNED)
+        self.assertGreater(self.node.trusted_pose_pub.publish.call_count, trusted_before)
+        self.node.stop_pub.publish.assert_not_called()
+        for call in self.h.evaluate.call_args_list:
+            self.assertEqual(call.kwargs["yolo_bbox"], top_box)
+
+    def test_multitarget_removal_exits_disappearance_wait_and_reinitializes(self):
+        top_box = [220.0, 80.0, 274.0, 156.0]
+        left_box = [113.0, 131.0, 202.0, 206.0]
+        both = [
+            {"class_id": 0, "confidence": 0.92, "bbox_xyxy": top_box},
+            {"class_id": 0, "confidence": 0.88, "bbox_xyxy": left_box},
+        ]
+        only_left = [{"class_id": 0, "confidence": 0.88, "bbox_xyxy": left_box}]
+
+        for _ in range(self.node.lifecycle.params.stable_yolo_frames):
+            self._tick_with_detections(both)
+        request_id = self.node.active_request["request_id"]
+        stamp = self.h.now_ns
+        self.node._candidate_pose_cb(pose_msg(stamp))
+        self.node._candidate_status_cb(json_msg({"request_id": request_id, "frame_stamp_ns": stamp}))
+        self._tick_with_detections(both)
+        self.h.status("tracking", initial_stamp=stamp)
+        for _ in range(3):
+            self.h.feed_pose()
+            self._tick_with_detections(both)
+        self.assertEqual(self.node.tracking_state_filter.state, M3T_OWNED)
+
+        # Support timeout stops M3T while top_box is still seen -> awaiting disappearance.
+        requests_before = self.node.init_request_pub.publish.call_count
+        self.h.evaluate.return_value = weak_health()
+        for _ in range(12):
+            self.h.feed_pose()
+            self._tick_with_detections(both)
+            if self.node.stop_pub.publish.called:
+                break
+        self.node.stop_pub.publish.assert_called_once()
+        self.h.status("stopped", initial_stamp=stamp)
+
+        # While top_box stays present, wait_for_target_disappearance holds.
+        self._tick_with_detections(both)
+        self.assertEqual(self._last_state()["action"], "wait_for_target_disappearance")
+
+        # Once top_box is removed, remaining left_box must not block disappearance
+        # confirmation, and after stable_yolo_frames a new request targets left_box.
+        for _ in range(3):
+            self._tick_with_detections(only_left)
+        self.assertEqual(self._last_state()["action"], "wait_for_target")
+        for _ in range(self.node.lifecycle.params.stable_yolo_frames):
+            self._tick_with_detections(only_left)
+        self.assertEqual(self.node.init_request_pub.publish.call_count, requests_before + 1)
+        self.assertEqual(self.node.active_request["bbox_xyxy"], left_box)
+
 
 if __name__ == "__main__":
     unittest.main()

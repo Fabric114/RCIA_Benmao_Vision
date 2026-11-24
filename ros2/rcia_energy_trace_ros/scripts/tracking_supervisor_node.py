@@ -12,6 +12,8 @@ import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Empty, String
@@ -134,6 +136,57 @@ def _bbox_area(bbox):
     return max(0.0, x2 - x1) * max(0.0, y2 - y1)
 
 
+def _bbox_iou(a, b):
+    inter_w = min(float(a[2]), float(b[2])) - max(float(a[0]), float(b[0]))
+    inter_h = min(float(a[3]), float(b[3])) - max(float(a[1]), float(b[1]))
+    inter = max(0.0, inter_w) * max(0.0, inter_h)
+    union = _bbox_area(a) + _bbox_area(b) - inter
+    return inter / union if union > 0.0 else 0.0
+
+
+def _bbox_center(bbox):
+    return (float(bbox[0]) + float(bbox[2])) / 2.0, (float(bbox[1]) + float(bbox[3])) / 2.0
+
+
+def select_detection_for_reference(
+    detections, reference_bbox=None, min_iou=0.15, max_center_dist_ratio=0.6
+):
+    """Pick the detection matching `reference_bbox` in a multi-target frame.
+
+    When `reference_bbox` is None, falls back to `select_best_detection`.
+    Otherwise prefers highest IoU >= `min_iou`, then nearest center within
+    `max_center_dist_ratio * diag(reference_bbox)`. Returns None when no
+    detection corresponds to the tracked target (avoiding jumping to a neighbor).
+    """
+    if not detections:
+        return None
+    if reference_bbox is None:
+        return select_best_detection(detections)
+
+    best_iou, best_det = max(
+        ((_bbox_iou(det["bbox_xyxy"], reference_bbox), det) for det in detections),
+        key=lambda item: item[0],
+    )
+    if best_iou >= min_iou:
+        return best_det
+
+    rx, ry = _bbox_center(reference_bbox)
+    diag = math.hypot(
+        float(reference_bbox[2]) - float(reference_bbox[0]),
+        float(reference_bbox[3]) - float(reference_bbox[1]),
+    )
+    max_dist = float(max_center_dist_ratio) * diag
+    nearest_det, nearest_dist = None, None
+    for det in detections:
+        cx, cy = _bbox_center(det["bbox_xyxy"])
+        dist = math.hypot(cx - rx, cy - ry)
+        if nearest_dist is None or dist < nearest_dist:
+            nearest_det, nearest_dist = det, dist
+    if nearest_dist is not None and nearest_dist <= max_dist:
+        return nearest_det
+    return None
+
+
 # M3T status values that mean the tracker is still starting for the current
 # initial pose. "catching_up" is reserved for the replay work that follows.
 M3T_STARTUP_STATES = frozenset({"starting", "catching_up"})
@@ -208,6 +261,7 @@ class TrackingSupervisorNode(Node):
         self.latest_m3t_status = {"state": "stopped", "stamp_ns": 0}
         self.latest_m3t_pose = None
         self.previous_valid_m3t_pose = None
+        self.tracked_target_bbox = None
         self.active_request = None
         self.request_counter = 0
         self.stop_in_flight = False
@@ -477,47 +531,74 @@ class TrackingSupervisorNode(Node):
             String, self.get_parameter("tracking_health_topic").value, 20
         )
 
-        self.create_subscription(Image, self.get_parameter("color_topic").value, self._color_cb, 2)
-        self.create_subscription(Image, self.get_parameter("depth_topic").value, self._depth_cb, 2)
+        # Subscriptions and timer each run in their own MutuallyExclusiveCallbackGroup.
+        # Subscriptions stay ordered (no reentrant out-of-order color/pose races)
+        # while remaining non-blocking relative to _tick() on the MultiThreadedExecutor.
+        self.subscription_group = MutuallyExclusiveCallbackGroup()
+        self.timer_group = MutuallyExclusiveCallbackGroup()
+        self.create_subscription(
+            Image,
+            self.get_parameter("color_topic").value,
+            self._color_cb,
+            2,
+            callback_group=self.subscription_group,
+        )
+        self.create_subscription(
+            Image,
+            self.get_parameter("depth_topic").value,
+            self._depth_cb,
+            2,
+            callback_group=self.subscription_group,
+        )
         self.create_subscription(
             CameraInfo,
             self.get_parameter("camera_info_topic").value,
             self._camera_info_cb,
             10,
+            callback_group=self.subscription_group,
         )
         self.create_subscription(
             String,
             self.get_parameter("yolo_detections_topic").value,
             self._yolo_cb,
             20,
+            callback_group=self.subscription_group,
         )
         self.create_subscription(
             PoseStamped,
             self.get_parameter("candidate_pose_topic").value,
             self._candidate_pose_cb,
             10,
+            callback_group=self.subscription_group,
         )
         self.create_subscription(
             String,
             self.get_parameter("candidate_status_topic").value,
             self._candidate_status_cb,
             10,
+            callback_group=self.subscription_group,
         )
         self.create_subscription(
             String,
             self.get_parameter("m3t_status_topic").value,
             self._m3t_status_cb,
             20,
+            callback_group=self.subscription_group,
         )
+        # Depth 1 keeps only the newest pose. A backlog of older poses would
+        # otherwise keep producing "stale M3T pose" after a blocked callback.
         self.create_subscription(
             PoseStamped,
             self.get_parameter("m3t_pose_topic").value,
             self._m3t_pose_cb,
-            20,
+            1,
+            callback_group=self.subscription_group,
         )
 
         rate_hz = max(1.0, float(self.get_parameter("supervisor_rate_hz").value))
-        self.timer = self.create_timer(1.0 / rate_hz, self._tick)
+        self.timer = self.create_timer(
+            1.0 / rate_hz, self._tick, callback_group=self.timer_group
+        )
         self.get_logger().info("Tracking supervisor is ready")
 
     def _log_effective_thresholds(self):
@@ -696,7 +777,14 @@ class TrackingSupervisorNode(Node):
             # Cached geometry belongs to the old camera timeline.
             self.health_cache = None
             self.previous_valid_m3t_pose = None
-        tracking_health, m3t_pose_available = self._m3t_health(inputs, tracking_yolo_bbox)
+        if self.lifecycle.state == TRACKING and not bool(inputs["stop_pending"]):
+            tracking_health, m3t_pose_available = self._m3t_health(inputs, tracking_yolo_bbox)
+        else:
+            # Without an active tracker, a pose is leftover output and must not be
+            # rendered or trusted.
+            self.last_pose_color_stamp_ns = 0
+            tracking_health = self._empty_health("tracker not active", tracking_yolo_bbox)
+            m3t_pose_available = False
         tracking_filter_decision = self._tracking_filter_decision(
             inputs=inputs,
             raw_yolo_visible=raw_yolo_visible,
@@ -754,6 +842,10 @@ class TrackingSupervisorNode(Node):
             m3t_stop_ack_timed_out=stop_ack_timed_out,
         )
         decision = self.lifecycle.update(observation)
+        if self.lifecycle.state != TRACKING and not getattr(
+            self.lifecycle, "_awaiting_disappearance", False
+        ):
+            self.tracked_target_bbox = None
         self._log_candidate_decision(decision, candidate_result)
         self._log_stop_ack_timeout(decision)
         self._apply_decision(
@@ -773,6 +865,7 @@ class TrackingSupervisorNode(Node):
             tracking_filter_decision,
             yolo_gate,
             inputs["now_ns"],
+            yolo_visible=raw_yolo_visible,
         )
         if (
             m3t_pose_available
@@ -795,17 +888,44 @@ class TrackingSupervisorNode(Node):
                 f"pose_age_ms={candidate_result.pose_age_ms:.1f}"
             )
 
+    def _tracking_reference_bbox(self):
+        lifecycle = getattr(self, "lifecycle", None)
+        if lifecycle is None:
+            return None
+        if lifecycle.state == TRACKING or getattr(lifecycle, "_awaiting_disappearance", False):
+            return getattr(self, "tracked_target_bbox", None)
+        return None
+
     def _active_yolo(self, inputs):
         yolo = inputs["yolo"]
-        if not yolo or not yolo.get("selected"):
+        if not yolo:
             return None, False, 0.0
         age_ms = (inputs["now_ns"] - int(yolo.get("stamp_ns", 0))) / 1_000_000.0
-        if age_ms < 0.0 or age_ms > float(self.get_parameter("max_yolo_age_ms").value):
-            return None, False, float(yolo["selected"].get("confidence", 0.0))
+        fresh = 0.0 <= age_ms <= float(self.get_parameter("max_yolo_age_ms").value)
+        ref_bbox = self._tracking_reference_bbox()
+        if ref_bbox is not None:
+            detections = yolo.get("detections")
+            if detections is None:
+                detections = [yolo["selected"]] if yolo.get("selected") else []
+            selected = select_detection_for_reference(detections, ref_bbox)
+            lifecycle = getattr(self, "lifecycle", None)
+            if (
+                fresh
+                and selected is not None
+                and lifecycle is not None
+                and lifecycle.state == TRACKING
+            ):
+                self.tracked_target_bbox = [float(v) for v in selected["bbox_xyxy"][:4]]
+        else:
+            selected = yolo.get("selected")
+        if not selected:
+            return None, False, 0.0
+        if not fresh:
+            return None, False, float(selected.get("confidence", 0.0))
         return (
-            yolo["selected"]["bbox_xyxy"],
+            selected["bbox_xyxy"],
             True,
-            float(yolo["selected"].get("confidence", 0.0)),
+            float(selected.get("confidence", 0.0)),
         )
 
     def _preinit_yolo_gate(self, inputs, yolo_bbox):
@@ -908,15 +1028,23 @@ class TrackingSupervisorNode(Node):
     def _matching_yolo_for_frame(self, inputs, color_stamp_ns, fallback_bbox=None):
         """Find the YOLO message captured within the frame tolerance of an image.
 
-        Returns (found, bbox). `bbox` is the selected box of the closest message,
-        or None when that message has no detection. Without a YOLO history,
-        `inputs["yolo"]` is the only candidate and `fallback_bbox` is its box.
+        Returns (found, bbox). `bbox` is the detection matching the currently
+        tracked target (or the selected box when single-target / no reference
+        exists), or None when that message has no matching detection. Without a
+        YOLO history, `inputs["yolo"]` is the only candidate and `fallback_bbox`
+        is its box.
         """
         color_stamp_ns = int(color_stamp_ns)
         if color_stamp_ns <= 0:
             return False, None
         tolerance_ns = int(
             float(self.get_parameter("tracking_yolo_frame_tolerance_ms").value) * 1_000_000
+        )
+        lifecycle = getattr(self, "lifecycle", None)
+        ref_bbox = (
+            getattr(self, "tracked_target_bbox", None)
+            if (lifecycle is not None and lifecycle.state == TRACKING)
+            else None
         )
         history = inputs.get("yolo_history")
         if not history:
@@ -925,6 +1053,9 @@ class TrackingSupervisorNode(Node):
                 return False, None
             if abs(int(yolo.get("stamp_ns", 0)) - color_stamp_ns) > tolerance_ns:
                 return False, None
+            if ref_bbox is not None and yolo.get("detections") is not None:
+                matched = select_detection_for_reference(yolo["detections"], ref_bbox)
+                return True, (None if matched is None else matched["bbox_xyxy"])
             return True, fallback_bbox
         best = None
         best_delta_ns = None
@@ -935,6 +1066,9 @@ class TrackingSupervisorNode(Node):
                 best_delta_ns = delta_ns
         if best is None:
             return False, None
+        if ref_bbox is not None and best.get("detections") is not None:
+            matched = select_detection_for_reference(best["detections"], ref_bbox)
+            return True, (None if matched is None else matched["bbox_xyxy"])
         selected = best.get("selected")
         return True, (None if not selected else selected["bbox_xyxy"])
 
@@ -1055,7 +1189,7 @@ class TrackingSupervisorNode(Node):
         # Called with self.lock held. Only reads the session stamp.
         return m3t_status_belongs_to_session(status, self.session_initial_pose_stamp_ns)
 
-    def _start_attempt(self, now_mono_ns, initial_pose_stamp_ns):
+    def _start_attempt(self, now_mono_ns, initial_pose_stamp_ns, target_bbox=None):
         """Begin a new M3T session. Old pose and health state must not carry over."""
         with self.lock:
             self.session_initial_pose_stamp_ns = int(initial_pose_stamp_ns)
@@ -1065,6 +1199,11 @@ class TrackingSupervisorNode(Node):
                 "stamp_ns": int(initial_pose_stamp_ns),
                 "initial_pose_stamp_ns": int(initial_pose_stamp_ns),
             }
+            if target_bbox is None and self.active_request is not None:
+                target_bbox = self.active_request.get("bbox_xyxy")
+            self.tracked_target_bbox = (
+                None if target_bbox is None else [float(v) for v in target_bbox[:4]]
+            )
         self.previous_valid_m3t_pose = None
         self.health_cache = None
         self.last_pose_color_stamp_ns = 0
@@ -1124,22 +1263,35 @@ class TrackingSupervisorNode(Node):
         candidate_pose_msg,
         m3t_pose,
     ):
+        with self.lock:
+            stop_in_flight = self.stop_in_flight
+            request_bbox = (
+                None if self.active_request is None else self.active_request.get("bbox_xyxy")
+            )
         if (
             decision.publish_init_request
             and yolo_bbox is not None
-            and not self.stop_in_flight
+            and not stop_in_flight
         ):
             self._publish_init_request(now_ns, yolo_bbox, yolo_conf, decision.reason)
         if decision.clear_candidate:
             self._clear_active_request()
-        if decision.publish_stop and not self.stop_in_flight:
-            self.stop_pub.publish(Empty())
+        if decision.publish_stop:
+            should_publish_stop = False
             with self.lock:
-                self.stop_in_flight = True
-                self.stop_sent_mono_ns = now_mono_ns
-                self.stop_sent_status_seq = self.m3t_status_seq
-                self.stop_ack_timeout_logged = False
-            self.tracking_state_filter.reset_to_search()
+                if not self.stop_in_flight:
+                    self.stop_in_flight = True
+                    self.stop_sent_mono_ns = now_mono_ns
+                    self.stop_sent_status_seq = self.m3t_status_seq
+                    self.stop_ack_timeout_logged = False
+                    self.latest_m3t_pose = None
+                    should_publish_stop = True
+            if should_publish_stop:
+                self.stop_pub.publish(Empty())
+                self.previous_valid_m3t_pose = None
+                self.health_cache = None
+                self.last_pose_color_stamp_ns = 0
+                self.tracking_state_filter.reset_to_search()
         if decision.publish_stop:
             self._reset_yaw_canonicalizer()
         if decision.publish_initial_pose and candidate_pose_msg is not None:
@@ -1147,6 +1299,7 @@ class TrackingSupervisorNode(Node):
             self._start_attempt(
                 now_mono_ns,
                 stamp_to_nanoseconds(candidate_pose_msg.header.stamp),
+                target_bbox=request_bbox,
             )
             self._clear_active_request()
             self._reset_yaw_canonicalizer()
@@ -1175,27 +1328,29 @@ class TrackingSupervisorNode(Node):
         return msg
 
     def _publish_init_request(self, now_ns, yolo_bbox, yolo_conf, reason):
-        if self.active_request is not None:
-            return
-        self.request_counter += 1
-        request_id = f"supervisor-{self.request_counter}"
-        target_class = int(self.get_parameter("target_class").value)
-        payload = make_init_request_json(
-            request_id=request_id,
-            stamp_ns=now_ns,
-            target_class=target_class,
-            bbox_xyxy=yolo_bbox,
-            confidence=yolo_conf,
-            reason=reason,
-        )
-        self.active_request = json.loads(payload)
-        self.active_request["request_sent_ns"] = now_ns
+        with self.lock:
+            if self.active_request is not None:
+                return
+            self.request_counter += 1
+            request_id = f"supervisor-{self.request_counter}"
+            target_class = int(self.get_parameter("target_class").value)
+            payload = make_init_request_json(
+                request_id=request_id,
+                stamp_ns=now_ns,
+                target_class=target_class,
+                bbox_xyxy=yolo_bbox,
+                confidence=yolo_conf,
+                reason=reason,
+            )
+            self.active_request = json.loads(payload)
+            self.active_request["request_sent_ns"] = now_ns
+            active_bbox = self.active_request.get("bbox_xyxy")
         msg = String()
         msg.data = payload
         self.init_request_pub.publish(msg)
         self.get_logger().warning(
             "Published FoundationPose init request: "
-            f"request_id={request_id} bbox={self.active_request.get('bbox_xyxy')} "
+            f"request_id={request_id} bbox={active_bbox} "
             f"confidence={yolo_conf:.3f} reason={reason}"
         )
 
@@ -1232,12 +1387,14 @@ class TrackingSupervisorNode(Node):
         tracking_filter_decision,
         yolo_gate,
         now_ns,
+        yolo_visible=False,
     ):
         payload = {
             "stamp_ns": int(now_ns),
             "state": decision.state,
             "action": decision.action,
             "trusted": bool(decision.publish_trusted_pose),
+            "yolo_visible": bool(yolo_visible),
             "preinit_yolo_gate": yolo_gate.to_dict(),
             "candidate": candidate_result.to_dict(),
             "m3t": m3t_health.to_dict(),
@@ -1268,11 +1425,15 @@ class TrackingSupervisorNode(Node):
 def main():
     rclpy.init()
     node = TrackingSupervisorNode()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.remove_node(node)
+        executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

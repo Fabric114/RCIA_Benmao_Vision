@@ -91,6 +91,11 @@ def absent(ms, **changes):
     )
 
 
+def stale_pose_at(ms):
+    # The pose stamp stays at the last live pose (BASE_NS), so the sample is a duplicate.
+    return stale(0, now_monotonic_ns=BASE_NS + int(ms) * 1_000_000)
+
+
 def conflict(ms, **changes):
     # YOLO sees the target, but the synchronized projection disagrees.
     return observation_at(
@@ -210,6 +215,50 @@ class TrackingStateFilterTest(unittest.TestCase):
         self.assertFalse(decisions[-1].stop_m3t)
         self.assertEqual(decisions[-1].owned_confirm_streak, 0)
         self.assertFalse(decisions[-1].has_been_owned)
+
+    def test_single_conflict_followed_by_stale_pose_does_not_trigger_reinit(self):
+        sample_sets = {
+            "stale pose stamp frozen": [conflict(0)]
+            + [stale_pose_at(ms) for ms in range(125, 751, 125)],
+            "stale pose stamp advancing": [conflict(0)]
+            + [stale(ms) for ms in range(125, 751, 125)],
+            "single stall to 700 ms": [conflict(0), stale_pose_at(700)],
+        }
+        for name, samples in sample_sets.items():
+            with self.subTest(name=name):
+                state_filter = self.fresh_filter()
+                decisions = self.run_samples(state_filter, samples)
+
+                self.assertFalse(any(d.request_reinit for d in decisions))
+                self.assertFalse(any(d.reason == "external_conflict" for d in decisions))
+                self.assertEqual(decisions[-1].reliability_state, M3T_STARTING)
+
+    def test_intermittent_conflict_broken_by_stale_or_non_conflict_resets_conflict_timer(self):
+        # A stale duplicate at 375 ms breaks the run, so the timer restarts at 500 ms.
+        state_filter = self.fresh_filter()
+        samples = [
+            conflict(0), conflict(125), conflict(250), stale_pose_at(375),
+            conflict(500), conflict(625), conflict(750), conflict(875), conflict(1000),
+            conflict(1125),
+        ]
+        decisions = self.run_samples(state_filter, samples)
+        self.assertFalse(any(d.request_reinit for d in decisions[:9]))
+        self.assertEqual(decisions[8].reliability_state, M3T_STARTING)
+        self.assertEqual(decisions[9].reliability_state, REINIT_NEEDED)
+        self.assertEqual(decisions[9].reason, "external_conflict")
+
+        # A new weak sample at 250 ms breaks the run, so the timer restarts at 375 ms.
+        state_filter = self.fresh_filter()
+        samples = [
+            conflict(0), conflict(125), weak(250),
+            conflict(375), conflict(500), conflict(625), conflict(750),
+            conflict(875), conflict(1000),
+        ]
+        decisions = self.run_samples(state_filter, samples)
+        self.assertFalse(any(d.request_reinit for d in decisions[:8]))
+        self.assertEqual(decisions[7].reliability_state, M3T_STARTING)
+        self.assertEqual(decisions[8].reliability_state, REINIT_NEEDED)
+        self.assertEqual(decisions[8].reason, "external_conflict")
 
     def test_future_age_nan_or_inf_is_not_support(self):
         cases = [

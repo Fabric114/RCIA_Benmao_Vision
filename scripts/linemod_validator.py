@@ -123,7 +123,27 @@ def validate_rendered_depth_consistency(
         k_matrix,
         image_size=image_size,
     )
-    rendered_valid = (rendered_mask > 0) & np.isfinite(rendered_depth) & (rendered_depth > 0.0)
+    return validate_pre_rendered_depth_consistency(
+        rendered_mask,
+        rendered_depth,
+        observed_depth_image,
+        depth_scale=depth_scale,
+        max_depth_residual_m=max_depth_residual_m,
+        min_consistency_ratio=min_consistency_ratio,
+        min_overlap_pixels=min_overlap_pixels,
+    )
+
+
+def validate_pre_rendered_depth_consistency(
+    rendered_mask,
+    rendered_depth,
+    observed_depth_image,
+    depth_scale=0.001,
+    max_depth_residual_m=0.02,
+    min_consistency_ratio=0.70,
+    min_overlap_pixels=50,
+):
+    rendered_valid = (np.asarray(rendered_mask) > 0) & np.isfinite(rendered_depth) & (rendered_depth > 0.0)
     rendered_count = int(np.count_nonzero(rendered_valid))
     if rendered_count == 0:
         return RenderedDepthConsistencyResult(

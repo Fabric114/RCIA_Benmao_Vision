@@ -3,10 +3,13 @@ import math
 
 import numpy as np
 
-from scripts.linemod_silhouette_renderer import render_model_buffers
+from scripts.linemod_silhouette_renderer import render_mask_and_depth
+
+# Kept as a module attribute: tests/test_m3t_tracking_health_gate.py patches this name.
+from scripts.linemod_silhouette_renderer import render_model_buffers  # noqa: F401
 from scripts.linemod_validator import (
     validate_black_white_appearance,
-    validate_rendered_depth_consistency,
+    validate_pre_rendered_depth_consistency,
 )
 
 
@@ -260,20 +263,17 @@ def validate_m3t_pose_health(
     params = params or WatchdogValidationParams()
     height, width = np.asarray(color_bgr).shape[:2]
     image_size = (width, height)
-    _, rendered_mask, _, _, _ = render_model_buffers(
+    rendered_mask, rendered_depth = render_mask_and_depth(
         vertices,
         faces,
         object_in_camera,
         k_matrix,
         image_size=image_size,
     )
-    depth_result = validate_rendered_depth_consistency(
-        vertices,
-        faces,
-        object_in_camera,
-        k_matrix,
+    depth_result = validate_pre_rendered_depth_consistency(
+        rendered_mask,
+        rendered_depth,
         observed_depth_image,
-        image_size=image_size,
         depth_scale=params.depth_scale,
         max_depth_residual_m=params.max_depth_residual_m,
         min_consistency_ratio=params.tracking_min_depth_consistency_ratio,
@@ -314,20 +314,17 @@ def validate_candidate_pose(
 
     height, width = np.asarray(color_bgr).shape[:2]
     image_size = (width, height)
-    _, rendered_mask, _, _, _ = render_model_buffers(
+    rendered_mask, rendered_depth = render_mask_and_depth(
         vertices,
         faces,
         candidate_pose,
         k_matrix,
         image_size=image_size,
     )
-    depth_result = validate_rendered_depth_consistency(
-        vertices,
-        faces,
-        candidate_pose,
-        k_matrix,
+    depth_result = validate_pre_rendered_depth_consistency(
+        rendered_mask,
+        rendered_depth,
         observed_depth_image,
-        image_size=image_size,
         depth_scale=params.depth_scale,
         max_depth_residual_m=params.max_depth_residual_m,
         min_consistency_ratio=params.tracking_min_depth_consistency_ratio,

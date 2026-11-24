@@ -522,12 +522,32 @@ class FoundationPoseInitNode(Node):
                 "selected_class": int(selected[5]),
             },
         )
+        register_conf = float(self.get_parameter("register_conf").value)
+        if register_conf < float(self.get_parameter("detect_conf").value):
+            register_detections = self.mask_gen.detect_only(
+                color,
+                target_class=self.target_class,
+                conf=register_conf,
+            )
+        else:
+            register_detections = detections
+        request_bbox = None if active_request is None else active_request.get("bbox_xyxy")
         mask, bbox = self.mask_gen.generate(
             color,
             depth,
             target_class=self.target_class,
-            conf=float(self.get_parameter("register_conf").value),
+            conf=register_conf,
+            request_bbox=request_bbox,
+            detections=register_detections,
         )
+        if bbox is None:
+            if request_bbox is None:
+                self.get_logger().warning("No YOLO detection at register_conf; skipping this frame")
+            else:
+                self.get_logger().warning(
+                    f"No YOLO detection matches init request bbox={request_bbox}; skipping this frame"
+                )
+            return
         if mask.sum() == 0:
             self.get_logger().warning("YOLO box has no valid depth near the object; skipping this frame")
             return

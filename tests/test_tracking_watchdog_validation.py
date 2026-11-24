@@ -1,9 +1,15 @@
 import math
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 
+from scripts.linemod_silhouette_renderer import render_mask_and_depth, render_model_buffers
+from scripts.linemod_validator import (
+    validate_black_white_appearance,
+    validate_rendered_depth_consistency,
+)
 from scripts.tracking_watchdog_validation import (
     WatchdogHealth,
     WatchdogValidationParams,
@@ -14,6 +20,8 @@ from scripts.tracking_watchdog_validation import (
     mask_bbox,
     pose_jump_ok,
     projection_iou_from_mask,
+    validate_candidate_pose,
+    validate_m3t_pose_health,
 )
 
 
@@ -263,6 +271,141 @@ class TrackingWatchdogValidationTest(unittest.TestCase):
             pose_valid=False,
             rendered_pixel_count=0,
         ).valid_depth_overlap_count, 0)
+
+
+class RenderOnceWatchdogValidationTest(unittest.TestCase):
+    def setUp(self):
+        self.vertices = np.array(
+            [
+                [-0.05, -0.05, 0.0],
+                [0.05, -0.05, 0.0],
+                [0.05, 0.05, 0.0],
+                [-0.05, 0.05, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        self.faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+        self.pose = np.eye(4, dtype=np.float64)
+        self.pose[:3, 3] = [0.0, 0.0, 0.5]
+        self.k_matrix = np.array(
+            [[600.0, 0.0, 80.0], [0.0, 600.0, 60.0], [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        )
+        _, self.mask, _, rendered_depth, _ = render_model_buffers(
+            self.vertices, self.faces, self.pose, self.k_matrix, image_size=(160, 120)
+        )
+        self.depth = np.zeros((120, 160), dtype=np.uint16)
+        self.depth[self.mask > 0] = np.round(rendered_depth[self.mask > 0] * 1000).astype(np.uint16)
+        self.color = np.full((120, 160, 3), (30, 30, 30), dtype=np.uint8)
+        self.color[:, 80:] = (220, 220, 220)
+        self.params = WatchdogValidationParams(
+            min_rendered_overlap_pixels=50,
+            tracking_min_depth_consistency_ratio=0.90,
+            max_depth_residual_m=0.005,
+            min_yolo_projection_iou=0.0,
+        )
+
+    def test_m3t_pose_health_renders_once_and_matches_reference_logic(self):
+        yolo_bbox = (20, 0, 140, 119)
+        previous_pose = self.pose.copy()
+
+        with mock.patch(
+            "scripts.tracking_watchdog_validation.render_mask_and_depth",
+            wraps=render_mask_and_depth,
+        ) as render_once, mock.patch(
+            "scripts.tracking_watchdog_validation.render_model_buffers"
+        ) as legacy_render:
+            actual = validate_m3t_pose_health(
+                self.vertices,
+                self.faces,
+                self.pose,
+                self.k_matrix,
+                self.color,
+                self.depth,
+                yolo_bbox=yolo_bbox,
+                previous_pose=previous_pose,
+                params=self.params,
+            )
+
+        render_once.assert_called_once()
+        legacy_render.assert_not_called()
+
+        _, reference_mask, _, _, _ = render_model_buffers(
+            self.vertices, self.faces, self.pose, self.k_matrix, image_size=(160, 120)
+        )
+        reference_depth_result = validate_rendered_depth_consistency(
+            self.vertices,
+            self.faces,
+            self.pose,
+            self.k_matrix,
+            self.depth,
+            image_size=(160, 120),
+            depth_scale=self.params.depth_scale,
+            max_depth_residual_m=self.params.max_depth_residual_m,
+            min_consistency_ratio=self.params.tracking_min_depth_consistency_ratio,
+            min_overlap_pixels=self.params.min_rendered_overlap_pixels,
+        )
+        expected = build_watchdog_health(
+            yolo_bbox=yolo_bbox,
+            rendered_mask=reference_mask,
+            depth_result=reference_depth_result,
+            appearance_result=validate_black_white_appearance(self.color, reference_mask),
+            previous_pose=previous_pose,
+            current_pose=self.pose,
+            params=self.params,
+        )
+
+        self.assertEqual(actual, expected)
+        self.assertTrue(actual.depth_success)
+        self.assertTrue(actual.black_white_success)
+
+    def test_candidate_pose_renders_once_and_matches_reference_logic(self):
+        yolo_bbox = (20, 0, 140, 119)
+
+        with mock.patch(
+            "scripts.tracking_watchdog_validation.render_mask_and_depth",
+            wraps=render_mask_and_depth,
+        ) as render_once, mock.patch(
+            "scripts.tracking_watchdog_validation.render_model_buffers"
+        ) as legacy_render:
+            actual = validate_candidate_pose(
+                self.vertices,
+                self.faces,
+                self.pose,
+                self.k_matrix,
+                self.color,
+                self.depth,
+                yolo_bbox,
+                params=self.params,
+            )
+
+        render_once.assert_called_once()
+        legacy_render.assert_not_called()
+
+        _, reference_mask, _, _, _ = render_model_buffers(
+            self.vertices, self.faces, self.pose, self.k_matrix, image_size=(160, 120)
+        )
+        reference_depth_result = validate_rendered_depth_consistency(
+            self.vertices,
+            self.faces,
+            self.pose,
+            self.k_matrix,
+            self.depth,
+            image_size=(160, 120),
+            depth_scale=self.params.depth_scale,
+            max_depth_residual_m=self.params.max_depth_residual_m,
+            min_consistency_ratio=self.params.tracking_min_depth_consistency_ratio,
+            min_overlap_pixels=self.params.min_rendered_overlap_pixels,
+        )
+        reference_appearance = validate_black_white_appearance(self.color, reference_mask)
+        self.assertTrue(actual.success, actual.reason)
+        self.assertEqual(actual.depth_consistency_ratio, reference_depth_result.consistency_ratio)
+        self.assertEqual(actual.rendered_pixel_count, reference_depth_result.rendered_pixel_count)
+        self.assertEqual(actual.black_white_success, reference_appearance.success)
+        self.assertEqual(
+            actual.projection_iou,
+            projection_iou_from_mask(reference_mask, yolo_bbox),
+        )
 
 
 if __name__ == "__main__":

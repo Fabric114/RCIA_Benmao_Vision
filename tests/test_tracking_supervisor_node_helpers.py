@@ -526,5 +526,77 @@ class TrackingSupervisorNodeHelpersTest(unittest.TestCase):
         fake.latest_buffer.put_color.assert_called_with(200, mock.ANY)
 
 
+class TrackingSupervisorNodeWiringTest(unittest.TestCase):
+    def test_subscription_depths_and_callback_groups(self):
+        import rclpy
+        from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+
+        module = load_tracking_supervisor_node()
+        rclpy.init()
+        try:
+            node = module.TrackingSupervisorNode()
+            try:
+                subs = {sub.callback: sub for sub in node.subscriptions}
+                depths = {
+                    name: subs[getattr(node, name)].qos_profile.depth
+                    for name in (
+                        "_color_cb",
+                        "_depth_cb",
+                        "_m3t_status_cb",
+                        "_m3t_pose_cb",
+                    )
+                }
+
+                self.assertEqual(depths["_m3t_pose_cb"], 1)
+                self.assertEqual(depths["_color_cb"], 2)
+                self.assertEqual(depths["_depth_cb"], 2)
+                self.assertEqual(depths["_m3t_status_cb"], 20)
+                for sub in node.subscriptions:
+                    self.assertIsInstance(sub.callback_group, MutuallyExclusiveCallbackGroup)
+                    self.assertIsNot(sub.callback_group, node.timer.callback_group)
+                self.assertIsInstance(node.timer.callback_group, MutuallyExclusiveCallbackGroup)
+            finally:
+                node.destroy_node()
+        finally:
+            rclpy.shutdown()
+
+
+class MultiTargetReferenceMatchingTest(unittest.TestCase):
+    def test_select_detection_for_reference_keeps_tracked_target_when_neighbor_conf_higher(self):
+        module = load_tracking_supervisor_node()
+        top = {"class_id": 0, "confidence": 0.88, "bbox_xyxy": [220.0, 80.0, 274.0, 156.0]}
+        left = {"class_id": 0, "confidence": 0.95, "bbox_xyxy": [113.0, 131.0, 202.0, 206.0]}
+
+        matched = module.select_detection_for_reference(
+            [left, top], reference_bbox=[220.0, 80.0, 274.0, 156.0]
+        )
+
+        self.assertEqual(matched, top)
+
+    def test_select_detection_for_reference_returns_none_when_tracked_target_removed(self):
+        module = load_tracking_supervisor_node()
+        top = {"class_id": 0, "confidence": 0.89, "bbox_xyxy": [220.0, 80.0, 274.0, 156.0]}
+        # Neighbor box matches real 22-45/23-02 geometry (~103 px center separation, IoU=0).
+        matched = module.select_detection_for_reference(
+            [top], reference_bbox=[113.0, 131.0, 202.0, 206.0]
+        )
+
+        self.assertIsNone(matched)
+
+    def test_matching_yolo_for_frame_prefers_tracked_target_over_best_selected(self):
+        module = load_tracking_supervisor_node()
+        fake = make_fake_node(module)
+        fake.lifecycle = SimpleNamespace(state=module.TRACKING, _awaiting_disappearance=False)
+        fake.tracked_target_bbox = [220.0, 80.0, 274.0, 156.0]
+        top = {"class_id": 0, "confidence": 0.89, "bbox_xyxy": [221.0, 81.0, 275.0, 157.0]}
+        left = {"class_id": 0, "confidence": 0.92, "bbox_xyxy": [113.0, 131.0, 202.0, 206.0]}
+        entry = {"stamp_ns": 10, "detections": [left, top], "selected": left}
+
+        found, bbox = fake._matching_yolo_for_frame({"yolo_history": [entry]}, 10)
+
+        self.assertTrue(found)
+        self.assertEqual(bbox, top["bbox_xyxy"])
+
+
 if __name__ == "__main__":
     unittest.main()

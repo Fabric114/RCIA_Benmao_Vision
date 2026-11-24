@@ -175,6 +175,11 @@ class TrackingStateFilter:
                 observation, self.state, f"state held: {self.state}", kind, False, now
             )
 
+        # Clear the conflict run before the deadline check. A stale or otherwise
+        # non-conflict sample must not let an old conflict frame time out.
+        if not self._conflict_continues(observation, is_new, kind):
+            self._conflict_since_ns = None
+
         # A deadline that expired before this sample wins over it, so a late
         # good sample cannot cancel a timeout that already ran out.
         expired = self._expired_deadline(observation, now, kind)
@@ -308,6 +313,16 @@ class TrackingStateFilter:
             now,
         )
         self._update_scores(observation, kind)
+
+    def _conflict_continues(self, observation, is_new, kind):
+        # A conflict frame continues the run. A new non-conflict sample ends it,
+        # and so does a sample without a fresh, evaluated pose. A duplicate that
+        # is fresh and evaluated changes nothing.
+        if kind == EVIDENCE_CONFLICT:
+            return True
+        return bool(
+            not is_new and self._fresh_tracking(observation) and observation.health_evaluated
+        )
 
     @staticmethod
     def _since(condition, since_ns, now_ns):

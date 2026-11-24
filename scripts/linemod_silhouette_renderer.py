@@ -153,6 +153,191 @@ def render_model_buffers(vertices, faces, object_in_camera, k_matrix, image_size
     return color, mask, model_point_image, depth_image, normal_image
 
 
+_CANDIDATE_CHUNK_SIZE = 1 << 18
+_SPAN_TOLERANCE = 1e-5
+_SPAN_MARGIN_PX = 1e-3
+
+
+def _triangle_row_spans(points_uv, x_bounds, y_bounds, denominator):
+    """Return per-row candidate x spans that contain every pixel inside each triangle.
+
+    Each barycentric weight is linear in (x, y), so every edge gives a bound on x
+    for a fixed row. The bounds use a looser tolerance than the exact test, which
+    is applied to the candidates afterwards.
+    """
+    p0, p1, p2 = points_uv[:, 0], points_uv[:, 1], points_uv[:, 2]
+    d = denominator
+    a0 = (p1[:, 1] - p2[:, 1]) / d
+    a1 = (p2[:, 1] - p0[:, 1]) / d
+    b0 = (p2[:, 0] - p1[:, 0]) / d
+    b1 = (p0[:, 0] - p2[:, 0]) / d
+    c0 = (-(p1[:, 1] - p2[:, 1]) * p2[:, 0] - (p2[:, 0] - p1[:, 0]) * p2[:, 1]) / d
+    c1 = (-(p2[:, 1] - p0[:, 1]) * p2[:, 0] - (p0[:, 0] - p2[:, 0]) * p2[:, 1]) / d
+    coef_a = np.stack([a0, a1, -a0 - a1], axis=1)
+    coef_b = np.stack([b0, b1, -b0 - b1], axis=1)
+    coef_c = np.stack([c0, c1, 1.0 - c0 - c1], axis=1)
+
+    x0, x1 = x_bounds
+    y0, y1 = y_bounds
+    row_counts = y1 - y0 + 1
+    row_tri = np.repeat(np.arange(row_counts.size), row_counts)
+    row_offsets = np.cumsum(row_counts) - row_counts
+    row_y = y0[row_tri] + (np.arange(row_tri.size) - row_offsets[row_tri])
+
+    left = np.full(row_tri.size, -np.inf)
+    right = np.full(row_tri.size, np.inf)
+    infeasible = np.zeros(row_tri.size, dtype=bool)
+    yf = row_y.astype(np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for k in range(3):
+            a = coef_a[row_tri, k]
+            t = -_SPAN_TOLERANCE - (coef_b[row_tri, k] * yf + coef_c[row_tri, k])
+            q = t / a
+            left = np.maximum(left, np.where(a > 0, q, -np.inf))
+            right = np.minimum(right, np.where(a < 0, q, np.inf))
+            infeasible |= (a == 0) & (t > 0)
+
+    row_x0 = x0[row_tri].astype(np.float64)
+    row_x1 = x1[row_tri].astype(np.float64)
+    left = np.clip(np.ceil(left - _SPAN_MARGIN_PX), row_x0, row_x1)
+    right = np.clip(np.floor(right + _SPAN_MARGIN_PX), row_x0, row_x1)
+    right = np.where(infeasible, left - 1.0, right)
+    span_lengths = np.maximum(right - left + 1.0, 0.0).astype(np.int64)
+    return row_tri, row_y, left.astype(np.int64), span_lengths
+
+
+def render_mask_and_depth(vertices, faces, object_in_camera, k_matrix, image_size):
+    width, height = int(image_size[0]), int(image_size[1])
+    depth_buffer = np.full((height, width), np.inf, dtype=np.float64)
+
+    vertices = np.asarray(vertices, dtype=np.float64)
+    faces = np.asarray(faces, dtype=np.int64).reshape(-1, 3)
+    object_in_camera = np.asarray(object_in_camera, dtype=np.float64).reshape(4, 4)
+    k_matrix = np.asarray(k_matrix, dtype=np.float64).reshape(3, 3)
+    homogeneous = np.concatenate([vertices, np.ones((vertices.shape[0], 1))], axis=1)
+    vertices_camera = (object_in_camera @ homogeneous.T).T[:, :3]
+
+    points_camera = vertices_camera[faces]
+    keep = np.all(points_camera[:, :, 2] > 0.001, axis=1)
+    points_camera = points_camera[keep]
+    if points_camera.shape[0] == 0:
+        return (
+            np.zeros((height, width), dtype=np.uint8),
+            np.zeros((height, width), dtype=np.float64),
+        )
+    normals = np.cross(
+        points_camera[:, 1] - points_camera[:, 0],
+        points_camera[:, 2] - points_camera[:, 0],
+    )
+    keep = np.linalg.norm(normals, axis=1) > 1e-12
+    points_camera = points_camera[keep]
+    if points_camera.shape[0] == 0:
+        return (
+            np.zeros((height, width), dtype=np.uint8),
+            np.zeros((height, width), dtype=np.float64),
+        )
+
+    projected = points_camera @ k_matrix.T
+    points_uv = projected[:, :, :2] / projected[:, :, 2:3]
+    min_uv = np.floor(points_uv.min(axis=1))
+    max_uv = np.ceil(points_uv.max(axis=1))
+    keep = (
+        (min_uv[:, 0] <= width - 1)
+        & (max_uv[:, 0] >= 0)
+        & (min_uv[:, 1] <= height - 1)
+        & (max_uv[:, 1] >= 0)
+    )
+    points_uv = points_uv[keep]
+    points_z = points_camera[keep][:, :, 2]
+    min_uv = min_uv[keep]
+    max_uv = max_uv[keep]
+
+    p0, p1, p2 = points_uv[:, 0], points_uv[:, 1], points_uv[:, 2]
+    denominator = (
+        (p1[:, 1] - p2[:, 1]) * (p0[:, 0] - p2[:, 0])
+        + (p2[:, 0] - p1[:, 0]) * (p0[:, 1] - p2[:, 1])
+    )
+    keep = np.abs(denominator) > 1e-12
+    points_uv = points_uv[keep]
+    points_z = points_z[keep]
+    min_uv = min_uv[keep]
+    max_uv = max_uv[keep]
+    denominator = denominator[keep]
+
+    x0 = np.clip(min_uv[:, 0], 0, width - 1).astype(np.int64)
+    x1 = np.clip(max_uv[:, 0], 0, width - 1).astype(np.int64)
+    y0 = np.clip(min_uv[:, 1], 0, height - 1).astype(np.int64)
+    y1 = np.clip(max_uv[:, 1], 0, height - 1).astype(np.int64)
+    if x0.size == 0:
+        return (
+            np.zeros((height, width), dtype=np.uint8),
+            np.zeros((height, width), dtype=np.float64),
+        )
+
+    row_tri, row_y, row_left, span_lengths = _triangle_row_spans(
+        points_uv, (x0, x1), (y0, y1), denominator
+    )
+
+    triangle_table = np.stack(
+        [
+            p1[:, 1] - p2[:, 1],
+            p2[:, 0] - p1[:, 0],
+            p2[:, 0],
+            p2[:, 1],
+            denominator,
+            p2[:, 1] - p0[:, 1],
+            p0[:, 0] - p2[:, 0],
+            points_z[:, 0],
+            points_z[:, 1],
+            points_z[:, 2],
+        ],
+        axis=1,
+    )
+
+    depth_flat = depth_buffer.reshape(-1)
+    cumulative = np.cumsum(span_lengths)
+    begin = 0
+    while begin < span_lengths.size:
+        base = int(cumulative[begin - 1]) if begin > 0 else 0
+        end = max(
+            begin + 1,
+            int(np.searchsorted(cumulative, base + _CANDIDATE_CHUNK_SIZE, side="right")),
+        )
+        segment = slice(begin, end)
+        lengths = span_lengths[segment]
+        begin = end
+        total = int(lengths.sum())
+        if total == 0:
+            continue
+        offsets = np.cumsum(lengths) - lengths
+        px = np.arange(total) + np.repeat(row_left[segment] - offsets, lengths)
+        py = np.repeat(row_y[segment], lengths)
+        table = np.repeat(triangle_table[row_tri[segment]], lengths, axis=0)
+
+        grid_x = px.astype(np.float64)
+        grid_y = py.astype(np.float64)
+        d = table[:, 4]
+        dx = grid_x - table[:, 2]
+        dy = grid_y - table[:, 3]
+        w0 = (table[:, 0] * dx + table[:, 1] * dy) / d
+        w1 = (table[:, 5] * dx + table[:, 6] * dy) / d
+        w2 = 1.0 - w0 - w1
+        inside = (w0 >= -1e-6) & (w1 >= -1e-6) & (w2 >= -1e-6)
+        interpolated_z = w0 * table[:, 7] + w1 * table[:, 8] + w2 * table[:, 9]
+        pixel = (py * width + px)[inside]
+        value = interpolated_z[inside]
+        while pixel.size:
+            improved = value < depth_flat[pixel]
+            pixel = pixel[improved]
+            value = value[improved]
+            depth_flat[pixel] = value
+
+    mask = np.where(np.isfinite(depth_buffer), 255, 0).astype(np.uint8)
+    depth_image = depth_buffer.copy()
+    depth_image[~np.isfinite(depth_image)] = 0.0
+    return mask, depth_image
+
+
 def render_silhouette_with_model_points(vertices, faces, object_in_camera, k_matrix, image_size):
     color, mask, model_point_image, _, _ = render_model_buffers(
         vertices,

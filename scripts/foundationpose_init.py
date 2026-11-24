@@ -1,5 +1,6 @@
 
 import sys, os
+import math
 import shutil
 from pathlib import Path
 
@@ -37,6 +38,58 @@ K_D435 = np.array([
 ], dtype=np.float64)
 
 
+def _bbox_area(bbox):
+    x1, y1, x2, y2 = bbox[:4]
+    return max(0.0, float(x2) - float(x1)) * max(0.0, float(y2) - float(y1))
+
+
+def _bbox_iou(a, b):
+    inter_w = min(float(a[2]), float(b[2])) - max(float(a[0]), float(b[0]))
+    inter_h = min(float(a[3]), float(b[3])) - max(float(a[1]), float(b[1]))
+    inter = max(0.0, inter_w) * max(0.0, inter_h)
+    union = _bbox_area(a) + _bbox_area(b) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _bbox_center(bbox):
+    return (float(bbox[0]) + float(bbox[2])) / 2.0, (float(bbox[1]) + float(bbox[3])) / 2.0
+
+
+def select_detection_for_request(detections, request_bbox=None, min_iou=0.2):
+    """从 (x1, y1, x2, y2, conf, cls) 检测列表中选出一个框，无合适框时返回 None。
+
+    request_bbox 为 None 时选面积最大的框。否则选 IoU 最大且 >= min_iou 的框；
+    没有这样的框时，选中心距离最近且距离不超过 request_bbox 对角线的框。
+    """
+    if not detections:
+        return None
+    if request_bbox is None:
+        best_det, best_area = None, 0.0
+        for det in detections:
+            area = _bbox_area(det)
+            if area > best_area:
+                best_det, best_area = det, area
+        return best_det
+
+    best_iou, best_det = max(((_bbox_iou(det, request_bbox), det) for det in detections),
+                             key=lambda item: item[0])
+    if best_iou >= min_iou:
+        return best_det
+
+    rx, ry = _bbox_center(request_bbox)
+    diag = math.hypot(float(request_bbox[2]) - float(request_bbox[0]),
+                      float(request_bbox[3]) - float(request_bbox[1]))
+    nearest_det, nearest_dist = None, None
+    for det in detections:
+        cx, cy = _bbox_center(det)
+        dist = math.hypot(cx - rx, cy - ry)
+        if nearest_dist is None or dist < nearest_dist:
+            nearest_det, nearest_dist = det, dist
+    if nearest_dist is not None and nearest_dist <= diag:
+        return nearest_det
+    return None
+
+
 class MaskGenerator:
     """YOLO 检测 + 框内深度窗口，生成目标物体遮罩"""
 
@@ -63,40 +116,32 @@ class MaskGenerator:
             dets.append((int(x1), int(y1), int(x2), int(y2), conf_val, cls))
         return dets
 
-    def generate(self, color_bgr, depth_m, target_class=None, conf=0.7):
-        """对 BGR 图像运行 YOLO，取最大检测框，并在框内用深度窗口生成遮罩"""
-        H, W = color_bgr.shape[:2]
-        mask = np.zeros((H, W), dtype=bool)
+    def generate_from_detections(self, depth_m, detections, request_bbox=None):
+        """从已有检测结果中选框，并在框内用深度窗口生成遮罩；无可用框时返回 (空遮罩, None)"""
+        H, W = depth_m.shape[:2]
+        det = select_detection_for_request(detections, request_bbox)
+        if det is None:
+            return np.zeros((H, W), dtype=bool), None
 
-        # 1. YOLO 检测
-        color_rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
-        results = self.yolo.predict(color_rgb, conf=conf, verbose=False)
-
-        if len(results) == 0 or results[0].boxes is None or len(results[0].boxes) == 0:
-            return mask, None
-
-        # 选择最大检测框（可按类别过滤）
-        boxes = results[0].boxes
-        best_box = None
-        best_area = 0
-
-        for box in boxes:
-            cls = int(box.cls[0]) if box.cls is not None else None
-            if target_class is not None and cls != target_class:
-                continue
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-            area = (x2 - x1) * (y2 - y1)
-            if area > best_area:
-                best_area = area
-                best_box = (x1, y1, x2, y2)
-
-        if best_box is None:
-            return mask, None
-
-        # 2. 框内深度窗口生成遮罩
-        bbox_int = (int(best_box[0]), int(best_box[1]), int(best_box[2]), int(best_box[3]))
+        bbox_int = (int(det[0]), int(det[1]), int(det[2]), int(det[3]))
         mask = bbox_depth_mask(depth_m, bbox_int, self.center_frac, self.half_window_m)
         return mask, bbox_int
+
+    def generate(self, color_bgr, depth_m, target_class=None, conf=0.7,
+                 request_bbox=None, detections=None):
+        """对 BGR 图像运行 YOLO，选框后在框内用深度窗口生成遮罩
+
+        detections 不为 None 时直接复用（按 target_class 和 conf 过滤），不再运行 YOLO。
+        request_bbox 不为 None 时选与其匹配的框，否则选面积最大的框。
+        """
+        if detections is None:
+            detections = self.detect_only(color_bgr, target_class=target_class, conf=conf)
+        else:
+            detections = [
+                det for det in detections
+                if (target_class is None or det[5] == target_class) and det[4] >= conf
+            ]
+        return self.generate_from_detections(depth_m, detections, request_bbox=request_bbox)
 
 
 def read_frames_from_dir(data_dir):
